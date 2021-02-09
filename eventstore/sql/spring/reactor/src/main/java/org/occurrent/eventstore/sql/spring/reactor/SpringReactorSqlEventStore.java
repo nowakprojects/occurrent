@@ -33,7 +33,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     this.reactiveTransactionManager = reactiveTransactionManager;
     this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     this.sqlEventStoreConfig = sqlEventStoreConfig;
-    this.databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then().block();
+    this.databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then().block(); //TODO: Consider move invocation away from constructor
   }
 
   @Override
