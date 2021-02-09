@@ -10,6 +10,7 @@ import org.occurrent.filter.Filter;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.net.URI;
+import java.sql.PreparedStatement;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -17,9 +18,13 @@ import java.util.stream.Stream;
 class SpringJdbcEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
   private final JdbcTemplate jdbcTemplate;
+  private final JdbcEventStoreConfig jdbcEventStoreConfig;
 
-  public SpringJdbcEventStore(JdbcTemplate jdbcTemplate) {
+  public SpringJdbcEventStore(JdbcTemplate jdbcTemplate, JdbcEventStoreConfig jdbcEventStoreConfig) {
     this.jdbcTemplate = jdbcTemplate;
+    this.jdbcEventStoreConfig = jdbcEventStoreConfig;
+
+    this.jdbcTemplate.execute(jdbcEventStoreConfig.createEventStoreTableSql());
   }
 
   @Override

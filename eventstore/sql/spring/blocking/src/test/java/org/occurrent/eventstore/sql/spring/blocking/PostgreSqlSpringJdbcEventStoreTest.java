@@ -37,7 +37,8 @@ class PostgreSqlSpringJdbcEventStoreTest {
   void create_event_store() {
     SingleConnectionDataSource dataSource = dataSourceFrom(postgreSQLContainer);
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-    eventStore = new SpringJdbcEventStore(jdbcTemplate);
+    JdbcEventStoreConfig jdbcEventStoreConfig = new PostgreSqlJdbcEventStoreConfig("occurrent_cloud_events");
+    eventStore = new SpringJdbcEventStore(jdbcTemplate, jdbcEventStoreConfig);
   }
 
   @Test
