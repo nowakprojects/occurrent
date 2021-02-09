@@ -1,6 +1,7 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
 import io.cloudevents.CloudEvent;
+import jdk.jfr.Experimental;
 import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.api.reactor.EventStoreOperations;
@@ -13,6 +14,7 @@ import reactor.core.publisher.Mono;
 import java.net.URI;
 import java.util.function.Function;
 
+@Experimental
 class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
   @Override
