@@ -17,6 +17,8 @@ import reactor.core.publisher.Mono;
 import java.net.URI;
 import java.util.function.Function;
 
+import static java.util.Objects.requireNonNull;
+
 //https://hantsy.medium.com/introduction-to-r2dbc-82058417644b
 //https://medium.com/swlh/working-with-relational-database-using-r2dbc-databaseclient-d61a60ebc67f
 //https://hantsy.medium.com/
@@ -29,11 +31,19 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   private final SqlEventStoreConfig sqlEventStoreConfig;
 
   SpringReactorSqlEventStore(DatabaseClient databaseClient, ReactiveTransactionManager reactiveTransactionManager, SqlEventStoreConfig sqlEventStoreConfig) {
+    requireNonNull(databaseClient, DatabaseClient.class.getSimpleName() + " cannot be null");
+    requireNonNull(reactiveTransactionManager, ReactiveTransactionManager.class.getSimpleName() + " cannot be null");
+    requireNonNull(sqlEventStoreConfig, SqlEventStoreConfig.class.getSimpleName() + " cannot be null");
+
     this.databaseClient = databaseClient;
     this.reactiveTransactionManager = reactiveTransactionManager;
     this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     this.sqlEventStoreConfig = sqlEventStoreConfig;
-    this.databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then().block(); //TODO: Consider move invocation away from constructor
+    initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
+  }
+
+  private static Mono<Void> initializeEventStore(DatabaseClient databaseClient, SqlEventStoreConfig sqlEventStoreConfig) {
+    return databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then();
   }
 
   @Override
