@@ -1,21 +1,40 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
 import io.cloudevents.CloudEvent;
-import jdk.jfr.Experimental;
 import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.api.reactor.EventStoreOperations;
 import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.api.reactor.EventStream;
+import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.filter.Filter;
+import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.transaction.ReactiveTransactionManager;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.util.function.Function;
 
-@Experimental
+//https://hantsy.medium.com/introduction-to-r2dbc-82058417644b
+//https://medium.com/swlh/working-with-relational-database-using-r2dbc-databaseclient-d61a60ebc67f
+//https://hantsy.medium.com/
+//https://stackoverflow.com/questions/57971278/connection-pool-size-with-postgres-r2dbc-pool
 class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
+
+  private final DatabaseClient databaseClient;
+  private final ReactiveTransactionManager reactiveTransactionManager;
+  private final TransactionalOperator transactionalOperator;
+  private final SqlEventStoreConfig sqlEventStoreConfig;
+
+  SpringReactorSqlEventStore(DatabaseClient databaseClient, ReactiveTransactionManager reactiveTransactionManager, SqlEventStoreConfig sqlEventStoreConfig) {
+    this.databaseClient = databaseClient;
+    this.reactiveTransactionManager = reactiveTransactionManager;
+    this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
+    this.sqlEventStoreConfig = sqlEventStoreConfig;
+    this.databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then().block();
+  }
 
   @Override
   public Mono<Void> write(String streamId, WriteCondition writeCondition, Flux<CloudEvent> events) {

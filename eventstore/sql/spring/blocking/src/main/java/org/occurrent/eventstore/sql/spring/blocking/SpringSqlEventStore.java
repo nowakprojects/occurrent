@@ -6,6 +6,7 @@ import org.occurrent.eventstore.api.blocking.EventStore;
 import org.occurrent.eventstore.api.blocking.EventStoreOperations;
 import org.occurrent.eventstore.api.blocking.EventStoreQueries;
 import org.occurrent.eventstore.api.blocking.EventStream;
+import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.filter.Filter;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -14,16 +15,16 @@ import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-class SpringSqlEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
+public class SpringSqlEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
   private final JdbcTemplate jdbcTemplate;
-  private final JdbcEventStoreConfig jdbcEventStoreConfig;
+  private final SqlEventStoreConfig sqlEventStoreConfig;
 
-  public SpringSqlEventStore(JdbcTemplate jdbcTemplate, JdbcEventStoreConfig jdbcEventStoreConfig) {
+  public SpringSqlEventStore(JdbcTemplate jdbcTemplate, SqlEventStoreConfig sqlEventStoreConfig) {
     this.jdbcTemplate = jdbcTemplate;
-    this.jdbcEventStoreConfig = jdbcEventStoreConfig;
+    this.sqlEventStoreConfig = sqlEventStoreConfig;
 
-    this.jdbcTemplate.execute(jdbcEventStoreConfig.createEventStoreTableSql());
+    this.jdbcTemplate.execute(sqlEventStoreConfig.createEventStoreTableSql());
   }
 
   @Override

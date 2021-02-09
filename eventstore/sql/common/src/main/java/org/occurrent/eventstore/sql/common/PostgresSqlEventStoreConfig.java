@@ -1,10 +1,10 @@
-package org.occurrent.eventstore.sql.spring.blocking;
+package org.occurrent.eventstore.sql.common;
 
-class PostgreSqlJdbcEventStoreConfig implements JdbcEventStoreConfig {
+public class PostgresSqlEventStoreConfig implements SqlEventStoreConfig {
 
   private final String eventStoreTableName;
 
-  PostgreSqlJdbcEventStoreConfig(String eventStoreTableName) {
+  public PostgresSqlEventStoreConfig(String eventStoreTableName) {
     this.eventStoreTableName = eventStoreTableName;
   }
 
@@ -20,8 +20,11 @@ class PostgreSqlJdbcEventStoreConfig implements JdbcEventStoreConfig {
         + "dataschema VARCHAR(255)," + "\n"
         + "subject VARCHAR(255)," + "\n"
         + "streamid VARCHAR(255)," + "\n"
+        + "streamversion BIGINT," + "\n"
         + "data jsonb," + "\n"
-        + "time TIMESTAMP" + "\n"
+        + "time TIMESTAMP," + "\n"
+        + "PRIMARY KEY (id, source)," + "\n"
+        + "UNIQUE (streamid, streamversion)" + "\n"
         + ")";
   }
 }

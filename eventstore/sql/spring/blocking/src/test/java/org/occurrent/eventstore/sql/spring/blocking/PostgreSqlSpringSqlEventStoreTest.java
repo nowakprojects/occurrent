@@ -5,6 +5,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.occurrent.eventstore.api.blocking.EventStore;
+import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
+import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,8 +25,8 @@ class PostgreSqlSpringSqlEventStoreTest {
 
   static {
     postgreSQLContainer = new PostgreSQLContainer<>("postgres:13-alpine")
-        .withDatabaseName("occurrent");
-   //     .withExposedPorts(5432);
+        .withDatabaseName("occurrent")
+        .withExposedPorts(5432);
   }
 
   private static final URI NAME_SOURCE = URI.create("http://name");
@@ -36,8 +38,8 @@ class PostgreSqlSpringSqlEventStoreTest {
   void create_event_store() {
     SingleConnectionDataSource dataSource = dataSourceFrom(postgreSQLContainer);
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-    JdbcEventStoreConfig jdbcEventStoreConfig = new PostgreSqlJdbcEventStoreConfig("occurrent_cloud_events");
-    eventStore = new SpringSqlEventStore(jdbcTemplate, jdbcEventStoreConfig);
+    SqlEventStoreConfig sqlEventStoreConfig = new PostgresSqlEventStoreConfig("occurrent_cloud_events");
+    eventStore = new SpringSqlEventStore(jdbcTemplate, sqlEventStoreConfig);
   }
 
   @Test
