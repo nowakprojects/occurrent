@@ -7,6 +7,7 @@ import org.occurrent.eventstore.api.blocking.EventStoreOperations;
 import org.occurrent.eventstore.api.blocking.EventStoreQueries;
 import org.occurrent.eventstore.api.blocking.EventStream;
 import org.occurrent.filter.Filter;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.net.URI;
 import java.util.Optional;
@@ -15,9 +16,16 @@ import java.util.stream.Stream;
 
 class SpringJdbcEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
+  private final JdbcTemplate jdbcTemplate;
+
+  public SpringJdbcEventStore(JdbcTemplate jdbcTemplate) {
+    this.jdbcTemplate = jdbcTemplate;
+  }
+
   @Override
   public void write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
-
+    //jdbcTemplate.execute("create table car (id int, model varchar)");
+    //jdbcTemplate.execute("insert into car (id, model) values (1, 'Volkswagen Beetle')");
   }
 
   @Override
