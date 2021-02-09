@@ -80,6 +80,8 @@
         <dokka.version>1.4.10.2</dokka.version>
         <awaitility.version>4.0.3</awaitility.version>
         <postgresql.version>42.2.18</postgresql.version>
+        <r2dbc-postgresql.version>0.8.6.RELEASE</r2dbc-postgresql.version>
+        <spring-r2dbc.version>5.3.3</spring-r2dbc.version>
     </properties>
 
 

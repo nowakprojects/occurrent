@@ -8,6 +8,7 @@ class PostgreSqlJdbcEventStoreConfig implements JdbcEventStoreConfig {
     this.eventStoreTableName = eventStoreTableName;
   }
 
+  //TODO: Allow to configure if data is jsonb or bytea
   @Override
   public String createEventStoreTableSql() {
     return "CREATE TABLE IF NOT EXISTS " + eventStoreTableName + "("
@@ -20,7 +21,7 @@ class PostgreSqlJdbcEventStoreConfig implements JdbcEventStoreConfig {
         + "subject VARCHAR(255)," + "\n"
         + "streamid VARCHAR(255)," + "\n"
         + "data jsonb," + "\n"
-        + "time TIMESTAMP," + "\n"
+        + "time TIMESTAMP" + "\n"
         + ")";
   }
 }

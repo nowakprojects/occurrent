@@ -1,7 +1,6 @@
 package org.occurrent.eventstore.sql.spring.blocking;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.cloudevents.CloudEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -17,7 +16,7 @@ import java.util.stream.Stream;
 
 @Timeout(10)
 @Testcontainers
-class PostgreSqlSpringJdbcEventStoreTest {
+class PostgreSqlSpringSqlEventStoreTest {
 
   @Container
   private static final PostgreSQLContainer<?> postgreSQLContainer;
@@ -38,7 +37,7 @@ class PostgreSqlSpringJdbcEventStoreTest {
     SingleConnectionDataSource dataSource = dataSourceFrom(postgreSQLContainer);
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
     JdbcEventStoreConfig jdbcEventStoreConfig = new PostgreSqlJdbcEventStoreConfig("occurrent_cloud_events");
-    eventStore = new SpringJdbcEventStore(jdbcTemplate, jdbcEventStoreConfig);
+    eventStore = new SpringSqlEventStore(jdbcTemplate, jdbcEventStoreConfig);
   }
 
   @Test
