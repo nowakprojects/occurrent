@@ -8,6 +8,11 @@ public class PostgresSqlEventStoreConfig implements SqlEventStoreConfig {
     this.eventStoreTableName = eventStoreTableName;
   }
 
+  @Override
+  public String eventStoreTableName() {
+    return this.eventStoreTableName;
+  }
+
   //TODO: Allow to configure if data is jsonb or bytea
   @Override
   public String createEventStoreTableSql() {
