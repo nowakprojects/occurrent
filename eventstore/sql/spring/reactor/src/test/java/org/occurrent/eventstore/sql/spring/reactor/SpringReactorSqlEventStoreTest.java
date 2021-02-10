@@ -97,15 +97,17 @@ class SpringReactorSqlEventStoreTest {
     List<DomainEvent> events = Name.defineName(UUID.randomUUID().toString(), now, "John Doe");
     persist("name", WriteCondition.streamVersionEq(0), events).block();
 
-    // Then
-//    Mono<EventStream<CloudEvent>> eventStream = eventStore.read("name");
-//    VersionAndEvents versionAndEvents = deserialize(eventStream);
-//
-//    assertAll(
-//        () -> assertThat(versionAndEvents.version).isEqualTo(1),
-//        () -> assertThat(versionAndEvents.events).hasSize(1),
-//        () -> assertThat(versionAndEvents.events).containsExactlyElementsOf(events)
-//    );
+    //Then
+    Mono<EventStream<CloudEvent>> eventStream = eventStore.read("name");
+    final EventStream<CloudEvent> block = eventStream.block();
+    System.out.println(block);
+    //VersionAndEvents versionAndEvents = deserialize(eventStream);
+
+    //assertAll(
+    //    () -> assertThat(versionAndEvents.version).isEqualTo(1),
+    //    () -> assertThat(versionAndEvents.events).hasSize(1),
+    //    () -> assertThat(versionAndEvents.events).containsExactlyElementsOf(events)
+    //);
   }
 
   private VersionAndEvents deserialize(Mono<EventStream<CloudEvent>> eventStreamMono) {

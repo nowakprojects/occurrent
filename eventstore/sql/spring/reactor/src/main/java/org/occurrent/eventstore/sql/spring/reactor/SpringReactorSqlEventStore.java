@@ -1,6 +1,9 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
 import io.cloudevents.CloudEvent;
+import io.cloudevents.SpecVersion;
+import io.cloudevents.core.builder.CloudEventBuilder;
+import io.r2dbc.spi.Row;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.eventstore.api.LongConditionEvaluator;
 import org.occurrent.eventstore.api.WriteCondition;
@@ -15,13 +18,17 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.Parameter;
 import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
+import org.springframework.util.StreamUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.sql.Blob;
+import java.time.OffsetDateTime;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
+import static org.occurrent.eventstore.api.WriteCondition.anyStreamVersion;
 
 //https://hantsy.medium.com/introduction-to-r2dbc-82058417644b
 //https://medium.com/swlh/working-with-relational-database-using-r2dbc-databaseclient-d61a60ebc67f
@@ -71,9 +78,9 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
                       .bind("datacontenttype", event.getDataContentType())
                       .bind("dataschema", Parameter.fromOrEmpty(event.getDataSchema(), URI.class))
                       .bind("subject", event.getSubject())
-                      .bind(OccurrentCloudEventExtension.STREAM_ID, streamId)
-                      .bind(OccurrentCloudEventExtension.STREAM_VERSION, streamVersion)
-                      .bind("data", Parameter.fromOrEmpty(event.getData(), Object.class))
+                      .bind(OccurrentCloudEventExtension.STREAM_ID, Parameter.fromOrEmpty(streamId, String.class))
+                      .bind(OccurrentCloudEventExtension.STREAM_VERSION, Parameter.fromOrEmpty(streamVersion, String.class))
+                      .bind("data", Parameter.fromOrEmpty(event.getData() != null ? event.getData().toBytes() : null, Object.class))
                       .bind("time", event.getTime())
                       .then();
                 })).reduce(Mono::then).as(transactionalOperator::transactional).then();
@@ -168,18 +175,79 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     return null;
   }
 
+  //https://stackoverflow.com/questions/57942240/how-to-extract-jsonb-from-postgresql-to-spring-webflux-using-r2dbc
   @Override
   public Mono<EventStream<CloudEvent>> read(String streamId, int skip, int limit) {
-    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamId = '" + streamId + "' ORDER BY streamversion ASC LIMIT " + limit + " OFFSET " + skip;
-    //return data;
-    return null;
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid ORDER BY streamversion ASC LIMIT :limit OFFSET :offset";
+    final Mono<EventStreamEntity> eventStream = transactionalOperator.execute(
+        ts -> currentStreamVersion(streamId)
+            .flatMap(currentStreamVersion -> {
+              final Flux<CloudEvent> streamCloudEvents = databaseClient.sql(sql)
+                  .bind("streamid", streamId)
+                  .bind("limit", limit)
+                  .bind("offset", skip)
+                  .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+                  .all();
+              return Mono.just(new EventStreamEntity(streamId, currentStreamVersion, streamCloudEvents));
+            }).switchIfEmpty(Mono.fromSupplier(() -> new EventStreamEntity(streamId, 0, Flux.empty())))
+    ).single();
+    return eventStream.map(es -> es.map(cloudEvent -> cloudEvent));
+  }
+
+  private static CloudEvent eventStreamRowMapper(Row row) {
+    final String id = row.get("id", String.class);
+    final String source = row.get("source", String.class);
+    final String specVersion = row.get("source", String.class);
+    final String type = row.get("type", String.class);
+    final String dataContentType = row.get("datacontenttype", String.class);
+    final String dataSchema = row.get("dataschema", String.class);
+    final String subject = row.get("subject", String.class);
+    final String streamId = row.get(OccurrentCloudEventExtension.STREAM_ID, String.class);
+    final Long streamVersion = row.get(OccurrentCloudEventExtension.STREAM_VERSION, Long.class);
+    final Blob data = row.get("data", Blob.class);
+    final OffsetDateTime time = row.get("time", OffsetDateTime.class);
+    return CloudEventBuilder.fromSpecVersion(SpecVersion.parse(specVersion))
+        .withId(id)
+        .withSource(URI.create(source))
+        .withType(type)
+        .withDataContentType(dataContentType)
+        .withDataSchema(URI.create(dataSchema))
+        .withSubject(subject)
+        //.withData(data.getBytes(0, data.length()))
+        .withExtension(OccurrentCloudEventExtension.STREAM_ID, streamId)
+        .withExtension(OccurrentCloudEventExtension.STREAM_VERSION, streamVersion)
+        .build();
   }
 
   @Override
   public Mono<Void> write(String streamId, Flux<CloudEvent> events) {
-    return null;
+    return write(streamId, anyStreamVersion(), events);
   }
 
-  //private static class EventStreamEntity implements EventStream<> {
-//}
+  private static class EventStreamEntity implements EventStream<CloudEvent> {
+    private final String id;
+    private final long version;
+    private final Flux<CloudEvent> events;
+
+    EventStreamEntity(String id, long version, Flux<CloudEvent> events) {
+      this.id = id;
+      this.version = version;
+      this.events = events;
+    }
+
+    @Override
+    public String id() {
+      return id;
+    }
+
+    @Override
+    public long version() {
+      return version;
+    }
+
+    @Override
+    public Flux<CloudEvent> events() {
+      return events;
+    }
+  }
 }
