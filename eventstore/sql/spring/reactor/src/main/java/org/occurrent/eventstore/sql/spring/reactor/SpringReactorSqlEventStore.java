@@ -187,25 +187,25 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   @Override
   public Mono<EventStream<CloudEvent>> read(String streamId, int skip, int limit) {
     String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid ORDER BY streamversion ASC LIMIT :limit OFFSET :offset";
-    final Mono<EventStreamEntity> eventStream = transactionalOperator.execute(
-        ts -> currentStreamVersion(streamId)
-            .flatMap(currentStreamVersion -> {
-              final Flux<Mono<CloudEvent>> cloudEvents = databaseClient.sql(sql)
-                  .bind("streamid", streamId)
-                  .bind("limit", limit)
-                  .bind("offset", skip)
-                  .map(SpringReactorSqlEventStore::eventStreamRowMapper)
-                  .all()
-              return Mono.just(new EventStreamEntity(streamId, currentStreamVersion, streamCloudEvents));
-            }).switchIfEmpty(Mono.fromSupplier(() -> new EventStreamEntity(streamId, 0, Flux.empty())))
-    ).single();
-    return eventStream.map(es -> es.map(cloudEvent -> cloudEvent));
+    final Mono<Long> currentStreamVersion = currentStreamVersion(streamId);
+    final Flux<CloudEvent> cloudEvents = databaseClient.sql(sql)
+        .bind("streamid", streamId)
+        .bind("limit", limit)
+        .bind("offset", skip)
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .all()
+        .flatMap(cloudEventMono -> cloudEventMono);
+    return transactionalOperator.execute(ts ->
+        currentStreamVersion
+            .flatMap(streamVersion -> Mono.just(new EventStreamEntity(streamId, streamVersion, cloudEvents)))
+            .defaultIfEmpty(new EventStreamEntity(streamId, 0L, Flux.empty()))
+    ).single().map(cloudEvent -> cloudEvent);
   }
 
   private static Mono<CloudEvent> eventStreamRowMapper(Row row) {
     final String id = row.get("id", String.class);
     final String source = row.get("source", String.class);
-    final String specVersion = row.get("specversion", String.class);
+    final String specVersion = requireNonNull(row.get("specversion", String.class));
     final String type = row.get("type", String.class);
     final String dataContentType = row.get("datacontenttype", String.class);
     final String dataSchema = row.get("dataschema", String.class);
@@ -221,23 +221,27 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
         .withDataContentType(dataContentType)
         .withDataSchema(dataSchema != null ? URI.create(dataSchema) : null)
         .withTime(time)
-        .withData(
-            Mono.from(data.stream())
-                .map(
-                    byteBuffer -> {
-                      byte[] byteArray = new byte[byteBuffer.remaining()];
-                      byteBuffer.get(byteArray, 0, byteArray.length);
-                      return byteArray;
-                    }).block()
-
-        ).withSubject(subject);
+        .withSubject(subject);
     if (streamId != null) {
       cloudEvent = cloudEvent.withExtension(OccurrentCloudEventExtension.STREAM_ID, streamId);
     }
     if (streamVersion != null) {
       cloudEvent = cloudEvent.withExtension(OccurrentCloudEventExtension.STREAM_VERSION, streamVersion);
     }
-    return Mono.just(cloudEvent.build());
+    final Mono<byte[]> eventData = data == null
+        ? Mono.empty()
+        : Mono.from(data.stream())
+        .map(SpringReactorSqlEventStore::toByteArray);
+    final CloudEventBuilder finalCloudEvent = cloudEvent;
+    return eventData
+        .map(bytes -> finalCloudEvent.withData(bytes).build())
+        .defaultIfEmpty(finalCloudEvent.build());
+  }
+
+  private static byte[] toByteArray(ByteBuffer byteBuffer) {
+    byte[] byteArray = new byte[byteBuffer.remaining()];
+    byteBuffer.get(byteArray, 0, byteArray.length);
+    return byteArray;
   }
 
   @Override
