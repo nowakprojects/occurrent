@@ -3,9 +3,6 @@ package org.occurrent.eventstore.sql.spring.reactor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.cloudevents.CloudEvent;
 import io.cloudevents.core.builder.CloudEventBuilder;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -19,16 +16,11 @@ import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
-import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.functional.CheckedFunction;
 import org.occurrent.time.TimeConversion;
-import org.springframework.r2dbc.connection.R2dbcTransactionManager;
-import org.springframework.r2dbc.core.DatabaseClient;
-import org.springframework.transaction.ReactiveTransactionManager;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.shaded.com.google.common.base.Supplier;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -40,15 +32,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import static java.time.ZoneOffset.UTC;
 
 @Timeout(10)
 @Testcontainers
-class WritingAndReadingFromSpringReactorSqlEventStoreTest {
+class EventStoreWritingAndReadingSpringReactorSqlTest {
 
   @Container
   private static final PostgreSQLContainer<?> postgreSQLContainer;
@@ -65,36 +54,15 @@ class WritingAndReadingFromSpringReactorSqlEventStoreTest {
   }
 
   private static final URI NAME_SOURCE = URI.create("http://name");
-  private static ObjectMapper objectMapper = new ObjectMapper();
-  ;
 
   private EventStore eventStore;
-  private SqlEventStoreConfig sqlEventStoreConfig;
-  private DatabaseClient databaseClient;
   private final LocalDateTime now = LocalDateTime.now();
 
   @BeforeEach
   void create_event_store() {
-    ConnectionFactory connectionFactory = new PostgresqlConnectionFactory(
-        PostgresqlConnectionConfiguration.builder()
-            .host(postgreSQLContainer.getHost())
-            .database(postgreSQLContainer.getDatabaseName())
-            .username(postgreSQLContainer.getUsername())
-            .password(postgreSQLContainer.getPassword())
-            .build()
-    );
-    //DatabaseClient databaseClient = DatabaseClient.builder()
-    //    .connectionFactory(connectionFactory)
-    //    .bindMarkers(DialectResolver.getDialect(connectionFactory).getBindMarkersFactory())
-    //    .build();
-
-    databaseClient = DatabaseClient.builder()
-        .connectionFactory(connectionFactory)
-        .namedParameters(true)
-        .build();
-    ReactiveTransactionManager reactiveTransactionManager = new R2dbcTransactionManager(connectionFactory);
-    sqlEventStoreConfig = new PostgresSqlEventStoreConfig("occurrent_cloud_events");
-    eventStore = new SpringReactorSqlEventStore(databaseClient, reactiveTransactionManager, sqlEventStoreConfig);
+    eventStore = EventStoreFixture
+        .connectedTo(postgreSQLContainer)
+        .eventStoreInstance(new PostgresSqlEventStoreConfig("occurrent_cloud_events"));
   }
 
   @Test
@@ -225,6 +193,7 @@ class WritingAndReadingFromSpringReactorSqlEventStoreTest {
         .hasOnlyEvents(nameDefined, nameWasChanged1);
   }
 
+  //https://www.youtube.com/watch?v=8fVw-XzkW1E
   //TODO: read_skew_is_avoided_and_transaction_is_started
   //TODO: read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started
 
@@ -250,61 +219,6 @@ class WritingAndReadingFromSpringReactorSqlEventStoreTest {
     return EventStreamAssertions.thenEventStream(eventStream);
   }
 
-  private static class EventStreamAssertions {
-
-    private final Mono<EventStream<CloudEvent>> eventStream;
-
-    private EventStreamAssertions(Mono<EventStream<CloudEvent>> eventStream) {
-      this.eventStream = eventStream;
-    }
-
-    static EventStreamAssertions thenEventStream(Supplier<Mono<EventStream<CloudEvent>>> eventStream) {
-      return thenEventStream(eventStream.get());
-    }
-
-    static EventStreamAssertions thenEventStream(Mono<EventStream<CloudEvent>> eventStream) {
-      return new EventStreamAssertions(eventStream);
-    }
-
-    EventStreamAssertions hasVersion(Integer expectedVersion) {
-      return hasVersion(expectedVersion.longValue());
-    }
-
-    EventStreamAssertions hasVersion(Long expectedVersion) {
-      StepVerifier.create(eventStream.map(EventStream::version))
-          .expectNext(expectedVersion)
-          .verifyComplete();
-      return this;
-    }
-
-    EventStreamAssertions hasOnlyEvents(DomainEvent... events) {
-      return hasOnlyEvents(Arrays.stream(events).collect(Collectors.toList()));
-    }
-
-    EventStreamAssertions hasOnlyEvent(DomainEvent event) {
-      return hasOnlyEvents(Collections.singletonList(event));
-    }
-
-    EventStreamAssertions hasOnlyEvents(List<DomainEvent> events) {
-      StepVerifier.create(eventStream.flatMapMany(EventStream::events).map(deserialize()))
-          .expectNextSequence(events)
-          .verifyComplete();
-      return this;
-    }
-
-    EventStreamAssertions hasNoEvents() {
-      StepVerifier.create(eventStream.flatMapMany(EventStream::events).map(deserialize()))
-          .verifyComplete();
-      return this;
-    }
-
-    void notExist() {
-      hasVersion(0);
-      hasNoEvents();
-    }
-
-  }
-
   private List<DomainEvent> anSampleEvent() {
     return Name.defineName(anEventId(), now, "John Doe");
   }
@@ -317,18 +231,6 @@ class WritingAndReadingFromSpringReactorSqlEventStoreTest {
     return UUID.randomUUID().toString();
   }
 
-  private static Function<CloudEvent, DomainEvent> deserialize() {
-    return CheckedFunction.unchecked(WritingAndReadingFromSpringReactorSqlEventStoreTest::deserialize);
-  }
-
-  @SuppressWarnings({"unchecked", "ConstantConditions"})
-  private static <T extends DomainEvent> T deserialize(CloudEvent cloudEvent) {
-    try {
-      return (T) objectMapper.readValue(cloudEvent.getData().toBytes(), Class.forName(cloudEvent.getType()));
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-  }
 
   //TODO: Duplication below - same as ReactorMongoEventStore
   private Mono<Void> persist(String eventStreamId, CloudEvent event) {
@@ -374,15 +276,8 @@ class WritingAndReadingFromSpringReactorSqlEventStoreTest {
   }
 
   private byte[] serializeEvent(DomainEvent domainEvent) {
+    ObjectMapper objectMapper = new ObjectMapper();
     return CheckedFunction.unchecked(objectMapper::writeValueAsBytes).apply(domainEvent);
-  }
-
-  private static void await(CountDownLatch countDownLatch) {
-    try {
-      countDownLatch.await();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
   }
 
 }

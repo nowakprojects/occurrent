@@ -191,7 +191,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
         .map(SpringReactorSqlEventStore::eventStreamRowMapper)
         .all()
         .flatMap(cloudEventMono -> cloudEventMono);
-    return transactionalOperator.execute(ts ->
+    return transactionalOperator.execute(__ ->
         currentStreamVersion
             .flatMap(streamVersion -> Mono.just(new EventStreamEntity(streamId, streamVersion, cloudEvents)))
             .defaultIfEmpty(new EventStreamEntity(streamId, 0L, Flux.empty()))
