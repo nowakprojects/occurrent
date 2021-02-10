@@ -117,8 +117,12 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   private Mono<Long> currentStreamVersion(String streamId) {
-    String sql = "SELECT streamversion FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamId = '" + streamId + "' ORDER BY streamversion DESC LIMIT 1";
+    String sql = "SELECT streamversion FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid ORDER BY streamversion DESC LIMIT 1";
+    //String sql = "SELECT MAX(streamversion) FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid";
+
+
     return databaseClient.sql(sql)
+        .bind("streamid", streamId)
         .map(result -> result.get(0, Long.class))
         .one()
         .switchIfEmpty(Mono.just(0L));
@@ -166,6 +170,8 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Mono<EventStream<CloudEvent>> read(String streamId, int skip, int limit) {
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamId = '" + streamId + "' ORDER BY streamversion ASC LIMIT " + limit + " OFFSET " + skip;
+    //return data;
     return null;
   }
 
@@ -175,6 +181,5 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   //private static class EventStreamEntity implements EventStream<> {
-
-  //}
+//}
 }
