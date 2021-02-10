@@ -1,11 +1,10 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
 import io.cloudevents.CloudEvent;
-import io.cloudevents.CloudEventData;
 import io.cloudevents.SpecVersion;
 import io.cloudevents.core.builder.CloudEventBuilder;
-import io.cloudevents.core.data.BytesCloudEventData;
 import io.r2dbc.spi.Blob;
+import io.r2dbc.spi.R2dbcDataIntegrityViolationException;
 import io.r2dbc.spi.Row;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.eventstore.api.LongConditionEvaluator;
@@ -17,20 +16,17 @@ import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.filter.Filter;
-import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.Parameter;
 import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
-import org.springframework.util.StreamUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.time.OffsetDateTime;
-import java.util.Optional;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
@@ -56,14 +52,13 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     this.reactiveTransactionManager = reactiveTransactionManager;
     this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     this.sqlEventStoreConfig = sqlEventStoreConfig;
-    //initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
+    initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
   }
 
   static Mono<Void> initializeEventStore(DatabaseClient databaseClient, SqlEventStoreConfig sqlEventStoreConfig) {
     return databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then();
   }
 
-  //.bind("id", Parameter.fromOrEmpty(event.getId(), String.class));
   @Override
   public Mono<Void> write(String streamId, WriteCondition writeCondition, Flux<CloudEvent> events) {
     String sql = "INSERT INTO " + sqlEventStoreConfig.eventStoreTableName() + " "
@@ -71,7 +66,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
         + "(:id, :source, :specversion, :type, :datacontenttype, :dataschema, :subject, :streamid, :streamversion, :data, :time)";
     final Flux<Void> eventsToWrite = currentStreamVersionFulfillsCondition(streamId, writeCondition)
         .flatMapMany(currentStreamVersion ->
-            infiniteFluxFrom(currentStreamVersion)
+            autoIncrementFrom(currentStreamVersion)
                 .zipWith(events)
                 .flatMap(streamVersionAndEvent -> {
                   long streamVersion = streamVersionAndEvent.getT1();
@@ -90,7 +85,8 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
                       .bind("time", event.getTime())
                       .then();
                 }));
-    return eventsToWrite.as(transactionalOperator::transactional).then();
+    return eventsToWrite.as(transactionalOperator::transactional).then()
+        .onErrorMap(DataIntegrityViolationException.class, DataIntegrityViolationToDuplicateCloudEventExceptionTranslator::translateToDuplicateCloudEventException);
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
@@ -122,7 +118,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
-  private static Flux<Long> infiniteFluxFrom(Long currentStreamVersion) {
+  private static Flux<Long> autoIncrementFrom(Long currentStreamVersion) {
     return Flux.generate(() -> currentStreamVersion, (version, sink) -> {
       long nextVersion = version + 1L;
       sink.next(nextVersion);
