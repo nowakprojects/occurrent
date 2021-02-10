@@ -50,10 +50,10 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     this.reactiveTransactionManager = reactiveTransactionManager;
     this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     this.sqlEventStoreConfig = sqlEventStoreConfig;
-    initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
+    //initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
   }
 
-  private static Mono<Void> initializeEventStore(DatabaseClient databaseClient, SqlEventStoreConfig sqlEventStoreConfig) {
+  static Mono<Void> initializeEventStore(DatabaseClient databaseClient, SqlEventStoreConfig sqlEventStoreConfig) {
     return databaseClient.sql(sqlEventStoreConfig.createEventStoreTableSql()).then();
   }
 
@@ -63,17 +63,17 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     String sql = "INSERT INTO " + sqlEventStoreConfig.eventStoreTableName() + " "
         + "(id, source, specversion, type, datacontenttype, dataschema, subject, streamid, streamversion, data, time) VALUES"
         + "(:id, :source, :specversion, :type, :datacontenttype, :dataschema, :subject, :streamid, :streamversion, :data, :time)";
-    return currentStreamVersionFulfillsCondition(streamId, writeCondition)
+    final Flux<Void> eventsToWrite = currentStreamVersionFulfillsCondition(streamId, writeCondition)
         .flatMapMany(currentStreamVersion ->
             infiniteFluxFrom(currentStreamVersion)
                 .zipWith(events)
-                .map(streamVersionAndEvent -> {
+                .flatMap(streamVersionAndEvent -> {
                   long streamVersion = streamVersionAndEvent.getT1();
                   CloudEvent event = streamVersionAndEvent.getT2();
                   return databaseClient.sql(sql)
                       .bind("id", event.getId())
                       .bind("source", event.getSource())
-                      .bind("specversion", event.getSpecVersion())
+                      .bind("specversion", event.getSpecVersion().toString())
                       .bind("type", event.getType())
                       .bind("datacontenttype", event.getDataContentType())
                       .bind("dataschema", Parameter.fromOrEmpty(event.getDataSchema(), URI.class))
@@ -83,7 +83,8 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
                       .bind("data", Parameter.fromOrEmpty(event.getData() != null ? event.getData().toBytes() : null, Object.class))
                       .bind("time", event.getTime())
                       .then();
-                })).reduce(Mono::then).as(transactionalOperator::transactional).then();
+                }));
+    return eventsToWrite.as(transactionalOperator::transactional).then();
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
@@ -176,6 +177,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   //https://stackoverflow.com/questions/57942240/how-to-extract-jsonb-from-postgresql-to-spring-webflux-using-r2dbc
+  //https://github.com/r2dbc/r2dbc-h2/issues/115
   @Override
   public Mono<EventStream<CloudEvent>> read(String streamId, int skip, int limit) {
     String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid ORDER BY streamversion ASC LIMIT :limit OFFSET :offset";

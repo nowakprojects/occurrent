@@ -26,6 +26,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
 import java.net.URI;
 import java.time.LocalDateTime;
@@ -62,6 +63,9 @@ class SpringReactorSqlEventStoreTest {
   private ObjectMapper objectMapper;
 
   private EventStore eventStore;
+  private SqlEventStoreConfig sqlEventStoreConfig;
+  private DatabaseClient databaseClient;
+  private LocalDateTime now = LocalDateTime.now();
 
   @BeforeEach
   void create_event_store() {
@@ -79,51 +83,31 @@ class SpringReactorSqlEventStoreTest {
     //    .bindMarkers(DialectResolver.getDialect(connectionFactory).getBindMarkersFactory())
     //    .build();
 
-    DatabaseClient databaseClient = DatabaseClient.builder()
+    databaseClient = DatabaseClient.builder()
         .connectionFactory(connectionFactory)
         //.bindMarkers(() -> BindMarkersFactory.named(":", "", 20).create())
         .namedParameters(true)
         .build();
     ReactiveTransactionManager reactiveTransactionManager = new R2dbcTransactionManager(connectionFactory);
-    SqlEventStoreConfig sqlEventStoreConfig = new PostgresSqlEventStoreConfig("occurrent_cloud_events");
+    sqlEventStoreConfig = new PostgresSqlEventStoreConfig("occurrent_cloud_events");
     eventStore = new SpringReactorSqlEventStore(databaseClient, reactiveTransactionManager, sqlEventStoreConfig);
   }
 
   @Test
   void can_read_and_write_single_event() {
-    LocalDateTime now = LocalDateTime.now();
+    //Given
+    StepVerifier.create(SpringReactorSqlEventStore.initializeEventStore(databaseClient, sqlEventStoreConfig))
+        .verifyComplete();
 
     // When
     List<DomainEvent> events = Name.defineName(UUID.randomUUID().toString(), now, "John Doe");
-    persist("name", WriteCondition.streamVersionEq(0), events).block();
+    StepVerifier.create(persist("name", WriteCondition.streamVersionEq(0), events))
+        .verifyComplete();
 
     //Then
-    Mono<EventStream<CloudEvent>> eventStream = eventStore.read("name");
-    final EventStream<CloudEvent> block = eventStream.block();
-    System.out.println(block);
-    //VersionAndEvents versionAndEvents = deserialize(eventStream);
-
-    //assertAll(
-    //    () -> assertThat(versionAndEvents.version).isEqualTo(1),
-    //    () -> assertThat(versionAndEvents.events).hasSize(1),
-    //    () -> assertThat(versionAndEvents.events).containsExactlyElementsOf(events)
-    //);
-  }
-
-  private VersionAndEvents deserialize(Mono<EventStream<CloudEvent>> eventStreamMono) {
-    return eventStreamMono
-        .map(es -> {
-          List<DomainEvent> events = es.events()
-              .map(deserialize())
-              .toStream()
-              .collect(Collectors.toList());
-          return new VersionAndEvents(es.version(), events);
-        })
-        .block();
-  }
-
-  private List<DomainEvent> deserialize(Flux<CloudEvent> flux) {
-    return flux.map(deserialize()).toStream().collect(Collectors.toList());
+    StepVerifier.create(eventStore.read("name").flatMapMany(EventStream::events).map(deserialize()))
+        .expectNextSequence(events)
+        .verifyComplete();
   }
 
   private Function<CloudEvent, DomainEvent> deserialize() {
@@ -139,30 +123,7 @@ class SpringReactorSqlEventStoreTest {
     }
   }
 
-  private static class VersionAndEvents {
-    private final long version;
-    private final List<DomainEvent> events;
-
-    VersionAndEvents(long version, List<DomainEvent> events) {
-      this.version = version;
-      this.events = events;
-    }
-
-    @Override
-    public String toString() {
-      return "VersionAndEvents{" +
-          "version=" + version +
-          ", events=" + events +
-          '}';
-    }
-  }
-
   //TODO: Duplication below - same as ReactorMongoEventStore
-  private static String streamIdOf(Mono<EventStream<CloudEvent>> eventStreamMono) {
-    return eventStreamMono.map(EventStream::id).block();
-  }
-
-
   private Mono<Void> persist(String eventStreamId, CloudEvent event) {
     return eventStore.write(eventStreamId, Flux.just(event));
   }
