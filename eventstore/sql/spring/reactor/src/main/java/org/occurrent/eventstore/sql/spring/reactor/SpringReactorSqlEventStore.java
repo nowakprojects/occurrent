@@ -1,8 +1,11 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
 import io.cloudevents.CloudEvent;
+import io.cloudevents.CloudEventData;
 import io.cloudevents.SpecVersion;
 import io.cloudevents.core.builder.CloudEventBuilder;
+import io.cloudevents.core.data.BytesCloudEventData;
+import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Row;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.eventstore.api.LongConditionEvaluator;
@@ -14,6 +17,7 @@ import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.filter.Filter;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.Parameter;
 import org.springframework.transaction.ReactiveTransactionManager;
@@ -21,10 +25,12 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 import org.springframework.util.StreamUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.URI;
-import java.sql.Blob;
+import java.nio.ByteBuffer;
 import java.time.OffsetDateTime;
+import java.util.Optional;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
@@ -184,22 +190,22 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     final Mono<EventStreamEntity> eventStream = transactionalOperator.execute(
         ts -> currentStreamVersion(streamId)
             .flatMap(currentStreamVersion -> {
-              final Flux<CloudEvent> streamCloudEvents = databaseClient.sql(sql)
+              final Flux<Mono<CloudEvent>> cloudEvents = databaseClient.sql(sql)
                   .bind("streamid", streamId)
                   .bind("limit", limit)
                   .bind("offset", skip)
                   .map(SpringReactorSqlEventStore::eventStreamRowMapper)
-                  .all();
+                  .all()
               return Mono.just(new EventStreamEntity(streamId, currentStreamVersion, streamCloudEvents));
             }).switchIfEmpty(Mono.fromSupplier(() -> new EventStreamEntity(streamId, 0, Flux.empty())))
     ).single();
     return eventStream.map(es -> es.map(cloudEvent -> cloudEvent));
   }
 
-  private static CloudEvent eventStreamRowMapper(Row row) {
+  private static Mono<CloudEvent> eventStreamRowMapper(Row row) {
     final String id = row.get("id", String.class);
     final String source = row.get("source", String.class);
-    final String specVersion = row.get("source", String.class);
+    final String specVersion = row.get("specversion", String.class);
     final String type = row.get("type", String.class);
     final String dataContentType = row.get("datacontenttype", String.class);
     final String dataSchema = row.get("dataschema", String.class);
@@ -208,17 +214,30 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     final Long streamVersion = row.get(OccurrentCloudEventExtension.STREAM_VERSION, Long.class);
     final Blob data = row.get("data", Blob.class);
     final OffsetDateTime time = row.get("time", OffsetDateTime.class);
-    return CloudEventBuilder.fromSpecVersion(SpecVersion.parse(specVersion))
+    CloudEventBuilder cloudEvent = CloudEventBuilder.fromSpecVersion(SpecVersion.parse(specVersion))
         .withId(id)
-        .withSource(URI.create(source))
+        .withSource(source != null ? URI.create(source) : null)
         .withType(type)
         .withDataContentType(dataContentType)
-        .withDataSchema(URI.create(dataSchema))
-        .withSubject(subject)
-        //.withData(data.getBytes(0, data.length()))
-        .withExtension(OccurrentCloudEventExtension.STREAM_ID, streamId)
-        .withExtension(OccurrentCloudEventExtension.STREAM_VERSION, streamVersion)
-        .build();
+        .withDataSchema(dataSchema != null ? URI.create(dataSchema) : null)
+        .withTime(time)
+        .withData(
+            Mono.from(data.stream())
+                .map(
+                    byteBuffer -> {
+                      byte[] byteArray = new byte[byteBuffer.remaining()];
+                      byteBuffer.get(byteArray, 0, byteArray.length);
+                      return byteArray;
+                    }).block()
+
+        ).withSubject(subject);
+    if (streamId != null) {
+      cloudEvent = cloudEvent.withExtension(OccurrentCloudEventExtension.STREAM_ID, streamId);
+    }
+    if (streamVersion != null) {
+      cloudEvent = cloudEvent.withExtension(OccurrentCloudEventExtension.STREAM_VERSION, streamVersion);
+    }
+    return Mono.just(cloudEvent.build());
   }
 
   @Override

@@ -27,7 +27,7 @@ public class PostgresSqlEventStoreConfig implements SqlEventStoreConfig {
         + "streamid VARCHAR(255)," + "\n"
         + "streamversion BIGINT," + "\n"
         + "data bytea," + "\n"
-        + "time TIMESTAMP," + "\n"
+        + "time TIMESTAMPTZ," + "\n"
         + "PRIMARY KEY (id, source)," + "\n"
         + "UNIQUE (streamid, streamversion)" + "\n"
         + ")";
