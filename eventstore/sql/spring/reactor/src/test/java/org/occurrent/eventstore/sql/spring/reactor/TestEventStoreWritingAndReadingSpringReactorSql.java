@@ -14,30 +14,23 @@ import org.occurrent.domain.NameWasChanged;
 import org.occurrent.eventstore.api.DuplicateCloudEventException;
 import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.reactor.EventStore;
-import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
-import org.occurrent.functional.CheckedFunction;
-import org.occurrent.time.TimeConversion;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
-import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
-import static java.time.ZoneOffset.UTC;
 
 @Timeout(10)
 @Testcontainers
-class EventStoreWritingAndReadingSpringReactorSqlTest {
+class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventStoreTestSupport {
 
   @Container
   private static final PostgreSQLContainer<?> postgreSQLContainer;
@@ -53,10 +46,7 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
     postgreSQLContainer.setPortBindings(ports);
   }
 
-  private static final URI NAME_SOURCE = URI.create("http://name");
-
   private EventStore eventStore;
-  private final LocalDateTime now = LocalDateTime.now();
 
   @BeforeEach
   void create_event_store() {
@@ -68,8 +58,9 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
   @Test
   void can_read_and_write_single_event() {
     //Given
+    LocalDateTime now = LocalDateTime.now();
     String eventStreamId = anStreamId();
-    List<DomainEvent> events = anSampleEvent();
+    List<DomainEvent> events = Name.defineName(anEventId(), now, "John Doe");
 
     //When
     writeEvents(eventStreamId, events, WriteCondition.streamVersionEq(0));
@@ -83,6 +74,7 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
   @Test
   void can_read_and_write_multiple_events_at_once() {
     //Given
+    LocalDateTime now = LocalDateTime.now();
     String eventStreamId = anStreamId();
     List<DomainEvent> events = Composition.chain(Name.defineName(anEventId(), now, "Hello World"), es -> Name.changeName(es, anEventId(), now, "John Doe"));
 
@@ -98,6 +90,7 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
   @Test
   void can_read_and_write_multiple_events_at_different_occasions() {
     //Given
+    LocalDateTime now = LocalDateTime.now();
     String eventStreamId = anStreamId();
     NameDefined nameDefined = new NameDefined(anEventId(), now, "name");
     NameWasChanged nameWasChanged1 = new NameWasChanged(anEventId(), now.plusHours(1), "name2");
@@ -118,6 +111,7 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
   @Test
   void can_read_events_with_skip_and_limit() {
     //Given
+    LocalDateTime now = LocalDateTime.now();
     String eventStreamId = anStreamId();
     NameDefined nameDefined = new NameDefined(anEventId(), now, "name");
     NameWasChanged nameWasChanged1 = new NameWasChanged(anEventId(), now.plusHours(1), "name2");
@@ -197,89 +191,11 @@ class EventStoreWritingAndReadingSpringReactorSqlTest {
   //TODO: read_skew_is_avoided_and_transaction_is_started
   //TODO: read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started
 
-  private void writeEvents(String eventStreamId, List<DomainEvent> events) {
-    writeEvents(eventStreamId, events, WriteCondition.anyStreamVersion());
+
+  @Override
+  public EventStore eventStore() {
+    return this.eventStore;
   }
-
-  private void writeEvents(String eventStreamId, List<DomainEvent> events, WriteCondition writeCondition) {
-    StepVerifier.create(persist(eventStreamId, writeCondition, events))
-        .verifyComplete();
-  }
-
-  private void writeEvents(String eventStreamId, DomainEvent events, WriteCondition writeCondition) {
-    StepVerifier.create(persist(eventStreamId, writeCondition, Collections.singletonList(events)))
-        .verifyComplete();
-  }
-
-  private EventStreamAssertions thenEventStream(String eventStreamId) {
-    return EventStreamAssertions.thenEventStream(this.eventStore.read(eventStreamId));
-  }
-
-  private EventStreamAssertions thenEventStream(Mono<EventStream<CloudEvent>> eventStream) {
-    return EventStreamAssertions.thenEventStream(eventStream);
-  }
-
-  private List<DomainEvent> anSampleEvent() {
-    return Name.defineName(anEventId(), now, "John Doe");
-  }
-
-  private String anStreamId() {
-    return UUID.randomUUID().toString();
-  }
-
-  private String anEventId() {
-    return UUID.randomUUID().toString();
-  }
-
-
-  //TODO: Duplication below - same as ReactorMongoEventStore
-  private Mono<Void> persist(String eventStreamId, CloudEvent event) {
-    return eventStore.write(eventStreamId, Flux.just(event));
-  }
-
-  private Mono<Void> persist(String eventStreamId, DomainEvent event) {
-    return eventStore.write(eventStreamId, Flux.just(convertDomainEventCloudEvent(event)));
-  }
-
-  private Mono<Void> persist(String eventStreamId, Flux<DomainEvent> events) {
-    return eventStore.write(eventStreamId, events.map(this::convertDomainEventCloudEvent));
-  }
-
-  private Mono<Void> persist(String eventStreamId, List<DomainEvent> events) {
-    return persist(eventStreamId, Flux.fromIterable(events));
-  }
-
-  private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, DomainEvent event) {
-    List<DomainEvent> events = new ArrayList<>();
-    events.add(event);
-    return persist(eventStreamId, writeCondition, events);
-  }
-
-  private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, List<DomainEvent> events) {
-    return persist(eventStreamId, writeCondition, Flux.fromIterable(events));
-  }
-
-  private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, Flux<DomainEvent> events) {
-    return eventStore.write(eventStreamId, writeCondition, events.map(this::convertDomainEventCloudEvent));
-  }
-
-  private CloudEvent convertDomainEventCloudEvent(DomainEvent domainEvent) {
-    return CloudEventBuilder.v1()
-        .withId(domainEvent.getEventId())
-        .withSource(NAME_SOURCE)
-        .withType(domainEvent.getClass().getName())
-        .withTime(TimeConversion.toLocalDateTime(domainEvent.getTimestamp()).atOffset(UTC))
-        .withSubject(domainEvent.getClass().getSimpleName().substring(4)) // Defined or WasChanged
-        .withDataContentType("application/json")
-        .withData(serializeEvent(domainEvent))
-        .build();
-  }
-
-  private byte[] serializeEvent(DomainEvent domainEvent) {
-    ObjectMapper objectMapper = new ObjectMapper();
-    return CheckedFunction.unchecked(objectMapper::writeValueAsBytes).apply(domainEvent);
-  }
-
 }
 
 /*
