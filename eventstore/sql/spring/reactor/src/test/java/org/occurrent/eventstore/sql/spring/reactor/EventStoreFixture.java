@@ -29,7 +29,7 @@ class EventStoreFixture {
     return new EventStoreFixture(databaseClient, transactionManager);
   }
 
-  EventStore eventStoreInstance(SqlEventStoreConfig sqlEventStoreConfig) {
+  SpringReactorSqlEventStore eventStoreInstance(SqlEventStoreConfig sqlEventStoreConfig) {
     return new SpringReactorSqlEventStore(databaseClient, transactionManager, sqlEventStoreConfig);
   }
 

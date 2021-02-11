@@ -161,7 +161,15 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Mono<Long> count(Filter filter) {
-    return null;
+    String sql = sqlQueryFrom(filter);
+    return databaseClient.sql(sql)
+        .map(row -> row.get(0, Long.class))
+        .one();
+  }
+
+  //TODO!
+  private String sqlQueryFrom(Filter filter) {
+    return "SELECT COUNT(*) FROM " + sqlEventStoreConfig.eventStoreTableName(); //Default for Filter.All
   }
 
   @Override
