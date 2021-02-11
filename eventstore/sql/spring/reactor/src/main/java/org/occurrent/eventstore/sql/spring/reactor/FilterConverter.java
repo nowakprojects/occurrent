@@ -14,10 +14,15 @@ class FilterConverter {
     String fieldNamePrefix = null;
     requireNonNull(filter, "Filter cannot be null");
 
-    return convertFilterToSql(filter, fieldNamePrefix);
+    String sql = convertFilterToSql(fieldNamePrefix, filter);
+    if (sql.trim().equals("")) {
+      return "";
+    } else {
+      return " WHERE " + sql;
+    }
   }
 
-  private static String convertFilterToSql(Filter filter, String fieldNamePrefix) {
+  private static String convertFilterToSql(String fieldNamePrefix, Filter filter) {
     if (filter instanceof Filter.All) {
       return "";
     } else if (filter instanceof Filter.SingleConditionFilter) {
@@ -25,6 +30,17 @@ class FilterConverter {
       String fieldName = fieldNameOf(fieldNamePrefix, scf.fieldName);
       Condition<?> conditionToUse = scf.condition;
       return convertConditionToCriteria(fieldName, conditionToUse);
+    } else if (filter instanceof Filter.CompositionFilter) {
+      Filter.CompositionFilter cf = (Filter.CompositionFilter) filter;
+      String composedCriteria = cf.filters.stream().map(f -> convertFilterToSql(fieldNamePrefix, f)).reduce("", (s1, s2) -> s1 + " " + s2);
+      switch (cf.operator) {
+        case AND:
+          return " AND " + composedCriteria;
+        case OR:
+          return " OR " + composedCriteria;
+        default:
+          throw new IllegalStateException("Unexpected value: " + cf.operator);
+      }
     }
     return "";
   }
@@ -33,7 +49,7 @@ class FilterConverter {
     return fieldNamePrefix == null ? fieldName : fieldNamePrefix + "." + fieldName;
   }
 
-  public static <T> String convertConditionToCriteria(String fieldName, Condition<T> condition) {
+  private static <T> String convertConditionToCriteria(String fieldName, Condition<T> condition) {
     if (condition instanceof Condition.MultiOperandCondition) {
       Condition.MultiOperandCondition<T> operation = (Condition.MultiOperandCondition<T>) condition;
       Condition.MultiOperandConditionName operationName = operation.operationName;
@@ -55,17 +71,17 @@ class FilterConverter {
       Condition.SingleOperandConditionName singleOperandConditionName = singleOperandCondition.singleOperandConditionName;
       switch (singleOperandConditionName) {
         case EQ:
-          return fieldName + " = " + value;
+          return fieldName + " = " + "'" + value + "'";
         case LT:
-          return fieldName + " < " + value;
+          return fieldName + " < " + "'" + value + "'";
         case GT:
-          return fieldName + " > " + value;
+          return fieldName + " > " + "'" + value + "'";
         case LTE:
-          return fieldName + " <= " + value;
+          return fieldName + " <= " + "'" + value + "'";
         case GTE:
-          return fieldName + " >= " + value;
+          return fieldName + " >= " + "'" + value + "'";
         case NE:
-          return fieldName + " != " + value;
+          return fieldName + " != " + "'" + value + "'";
         default:
           throw new IllegalStateException("Unexpected value: " + singleOperandConditionName);
       }

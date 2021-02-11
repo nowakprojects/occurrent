@@ -167,9 +167,8 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
         .one();
   }
 
-  //TODO!
   private String sqlQueryFrom(Filter filter) {
-    return "SELECT COUNT(*) FROM " + sqlEventStoreConfig.eventStoreTableName(); //Default for Filter.All
+    return "SELECT COUNT(*) FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter);
   }
 
   @Override
