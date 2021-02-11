@@ -136,17 +136,23 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Mono<Void> deleteEventStream(String streamId) {
-    return null;
+    String sql = "DELETE FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid";
+    return databaseClient.sql(sql).bind("streamid", streamId).then();
   }
 
   @Override
   public Mono<Void> deleteEvent(String cloudEventId, URI cloudEventSource) {
-    return null;
+    String sql = "DELETE FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE id = :id AND source = :source";
+    return databaseClient.sql(sql)
+        .bind("id", cloudEventId)
+        .bind("source", cloudEventSource.toString())
+        .then();
   }
 
   @Override
   public Mono<Void> delete(Filter filter) {
-    return null;
+    String sql = "DELETE FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter);
+    return databaseClient.sql(sql).then();
   }
 
   @Override
@@ -162,22 +168,18 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   @Override
   public Mono<Long> count(Filter filter) {
     String sql = "SELECT COUNT(*) FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter);
-    return databaseClient.sql(sql)
-        .map(row -> row.get(0, Long.class))
-        .one();
+    return databaseClient.sql(sql).map(row -> row.get(0, Long.class)).one();
   }
 
   @Override
   public Mono<Boolean> exists(Filter filter) {
     String sql = "SELECT EXISTS(SELECT 1 FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter) + ")";
-    return databaseClient.sql(sql)
-        .map(row -> row.get(0, Boolean.class))
-        .one();
+    return databaseClient.sql(sql).map(row -> row.get(0, Boolean.class)).one();
   }
 
   @Override
   public Mono<Boolean> exists(String streamId) {
-    return null;
+    return exists(Filter.streamId(streamId));
   }
 
   //https://stackoverflow.com/questions/57942240/how-to-extract-jsonb-from-postgresql-to-spring-webflux-using-r2dbc
