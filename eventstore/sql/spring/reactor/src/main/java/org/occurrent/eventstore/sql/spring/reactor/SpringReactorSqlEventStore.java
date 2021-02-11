@@ -4,7 +4,6 @@ import io.cloudevents.CloudEvent;
 import io.cloudevents.SpecVersion;
 import io.cloudevents.core.builder.CloudEventBuilder;
 import io.r2dbc.spi.Blob;
-import io.r2dbc.spi.R2dbcDataIntegrityViolationException;
 import io.r2dbc.spi.Row;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.eventstore.api.LongConditionEvaluator;
@@ -16,6 +15,7 @@ import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.SqlEventStoreConfig;
 import org.occurrent.filter.Filter;
+import org.reactivestreams.Publisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.Parameter;
@@ -23,6 +23,7 @@ import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.function.Tuple2;
 
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -39,7 +40,6 @@ import static org.occurrent.eventstore.api.WriteCondition.anyStreamVersion;
 class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
   private final DatabaseClient databaseClient;
-  private final ReactiveTransactionManager reactiveTransactionManager;
   private final TransactionalOperator transactionalOperator;
   private final SqlEventStoreConfig sqlEventStoreConfig;
 
@@ -49,9 +49,8 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
     requireNonNull(sqlEventStoreConfig, SqlEventStoreConfig.class.getSimpleName() + " cannot be null");
 
     this.databaseClient = databaseClient;
-    this.reactiveTransactionManager = reactiveTransactionManager;
-    this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     this.sqlEventStoreConfig = sqlEventStoreConfig;
+    this.transactionalOperator = TransactionalOperator.create(reactiveTransactionManager);
     initializeEventStore(databaseClient, sqlEventStoreConfig).block(); //TODO: Consider move invocation away from constructor
   }
 
@@ -61,49 +60,48 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Mono<Void> write(String streamId, WriteCondition writeCondition, Flux<CloudEvent> events) {
-    String sql = "INSERT INTO " + sqlEventStoreConfig.eventStoreTableName() + " "
-        + "(id, source, specversion, type, datacontenttype, dataschema, subject, streamid, streamversion, data, time) VALUES"
-        + "(:id, :source, :specversion, :type, :datacontenttype, :dataschema, :subject, :streamid, :streamversion, :data, :time)";
     final Flux<Void> eventsToWrite = currentStreamVersionFulfillsCondition(streamId, writeCondition)
-        .flatMapMany(currentStreamVersion ->
-            autoIncrementFrom(currentStreamVersion)
-                .zipWith(events)
-                .flatMap(streamVersionAndEvent -> {
-                  long streamVersion = streamVersionAndEvent.getT1();
-                  CloudEvent event = streamVersionAndEvent.getT2();
-                  return databaseClient.sql(sql)
-                      .bind("id", event.getId())
-                      .bind("source", event.getSource())
-                      .bind("specversion", event.getSpecVersion().toString())
-                      .bind("type", event.getType())
-                      .bind("datacontenttype", event.getDataContentType())
-                      .bind("dataschema", Parameter.fromOrEmpty(event.getDataSchema(), URI.class))
-                      .bind("subject", event.getSubject())
-                      .bind(OccurrentCloudEventExtension.STREAM_ID, Parameter.fromOrEmpty(streamId, String.class))
-                      .bind(OccurrentCloudEventExtension.STREAM_VERSION, Parameter.fromOrEmpty(streamVersion, String.class))
-                      .bind("data", Parameter.fromOrEmpty(event.getData() != null ? event.getData().toBytes() : null, Object.class))
-                      .bind("time", event.getTime())
-                      .then();
-                }));
+        .flatMapMany(SpringReactorSqlEventStore::streamVersionIncrements)
+        .zipWith(events)
+        .flatMap(insertCloudEventTo(streamId));
     return eventsToWrite.as(transactionalOperator::transactional).then()
         .onErrorMap(DataIntegrityViolationException.class, DataIntegrityViolationToDuplicateCloudEventExceptionTranslator::translateToDuplicateCloudEventException);
+  }
+
+  private Function<Tuple2<Long, CloudEvent>, Mono<Void>> insertCloudEventTo(String streamId) {
+    String insertEventSql = "INSERT INTO " + sqlEventStoreConfig.eventStoreTableName() + " "
+        + "(id, source, specversion, type, datacontenttype, dataschema, subject, streamid, streamversion, data, time) VALUES"
+        + "(:id, :source, :specversion, :type, :datacontenttype, :dataschema, :subject, :streamid, :streamversion, :data, :time)";
+    return streamVersionAndEvent -> {
+      long streamVersion = streamVersionAndEvent.getT1();
+      CloudEvent event = streamVersionAndEvent.getT2();
+      return databaseClient.sql(insertEventSql)
+          .bind("id", event.getId())
+          .bind("source", event.getSource())
+          .bind("specversion", event.getSpecVersion().toString())
+          .bind("type", event.getType())
+          .bind("datacontenttype", event.getDataContentType())
+          .bind("dataschema", Parameter.fromOrEmpty(event.getDataSchema(), URI.class))
+          .bind("subject", event.getSubject())
+          .bind(OccurrentCloudEventExtension.STREAM_ID, Parameter.fromOrEmpty(streamId, String.class))
+          .bind(OccurrentCloudEventExtension.STREAM_VERSION, Parameter.fromOrEmpty(streamVersion, String.class))
+          .bind("data", Parameter.fromOrEmpty(event.getData() != null ? event.getData().toBytes() : null, Object.class))
+          .bind("time", event.getTime())
+          .then();
+    };
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
   private Mono<Long> currentStreamVersionFulfillsCondition(String streamId, WriteCondition writeCondition) {
     return currentStreamVersion(streamId)
-        .flatMap(currentStreamVersion -> {
-          final Mono<Long> result;
-          if (isFulfilled(currentStreamVersion, writeCondition)) {
-            result = Mono.just(currentStreamVersion);
-          } else {
-            result = Mono.error(new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition.toString(), currentStreamVersion)));
-          }
-          return result;
-        });
+        .flatMap(currentStreamVersion -> isFulfilled(currentStreamVersion, writeCondition)
+            ? Mono.just(currentStreamVersion)
+            : Mono.error(new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition.toString(), currentStreamVersion)))
+        );
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
+  //FIXME: Change to something more extendable - Specification pattern
   private static boolean isFulfilled(long streamVersion, WriteCondition writeCondition) {
     if (writeCondition.isAnyStreamVersion()) {
       return true;
@@ -118,7 +116,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   //TODO: Remove Duplication - same in ReactorMongoEventStore
-  private static Flux<Long> autoIncrementFrom(Long currentStreamVersion) {
+  private static Flux<Long> streamVersionIncrements(Long currentStreamVersion) {
     return Flux.generate(() -> currentStreamVersion, (version, sink) -> {
       long nextVersion = version + 1L;
       sink.next(nextVersion);

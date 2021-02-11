@@ -197,8 +197,8 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
         .hasOnlyEvents(nameDefined, nameWasChanged1);
   }
 
-  //https://www.youtube.com/watch?v=8fVw-XzkW1E
 
+  //TODO: Try to refactor with usage of StepVerifier
   @Test
   void read_skew_is_avoided_and_transaction_is_started() {
     // Given
@@ -237,6 +237,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
     );
   }
 
+  //TODO: Try to refactor with usage of StepVerifier
   @Test
   void read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started() {
     // Given
