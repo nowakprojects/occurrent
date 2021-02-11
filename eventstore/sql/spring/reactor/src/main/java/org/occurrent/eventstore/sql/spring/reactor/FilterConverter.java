@@ -4,6 +4,7 @@ import org.occurrent.condition.Condition;
 import org.occurrent.filter.Filter;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
@@ -32,17 +33,23 @@ class FilterConverter {
       return convertConditionToCriteria(fieldName, conditionToUse);
     } else if (filter instanceof Filter.CompositionFilter) {
       Filter.CompositionFilter cf = (Filter.CompositionFilter) filter;
-      String composedCriteria = cf.filters.stream().map(f -> convertFilterToSql(fieldNamePrefix, f)).reduce("", (s1, s2) -> s1 + " " + s2);
-      switch (cf.operator) {
-        case AND:
-          return " AND " + composedCriteria;
-        case OR:
-          return " OR " + composedCriteria;
-        default:
-          throw new IllegalStateException("Unexpected value: " + cf.operator);
-      }
+      String sqlOperator = toSqlOperator(cf);
+      return cf.filters.stream()
+          .map(f -> convertFilterToSql(fieldNamePrefix, f))
+          .collect(Collectors.joining(sqlOperator));
     }
     return "";
+  }
+
+  private static String toSqlOperator(Filter.CompositionFilter cf) {
+    switch (cf.operator) {
+      case AND:
+        return " AND ";
+      case OR:
+        return " OR ";
+      default:
+        throw new IllegalStateException("Unexpected value: " + cf.operator);
+    }
   }
 
   private static String fieldNameOf(String fieldNamePrefix, String fieldName) {
@@ -54,17 +61,10 @@ class FilterConverter {
       Condition.MultiOperandCondition<T> operation = (Condition.MultiOperandCondition<T>) condition;
       Condition.MultiOperandConditionName operationName = operation.operationName;
       List<Condition<T>> operations = operation.operations;
-      String criteria = operations.stream().map(c -> convertConditionToCriteria(fieldName, c)).reduce("", (s1, s2) -> s1 + " " + s2);
-      switch (operationName) {
-        case AND:
-          return " AND " + criteria;
-        case OR:
-          return " OR " + criteria;
-        case NOT:
-          return " NOT " + criteria;
-        default:
-          throw new IllegalStateException("Unexpected value: " + operationName);
-      }
+      String operationSql = operationNameToSql(operationName);
+      return operations.stream()
+          .map(c -> convertConditionToCriteria(fieldName, c))
+          .collect(Collectors.joining(operationSql));
     } else if (condition instanceof Condition.SingleOperandCondition) {
       Condition.SingleOperandCondition<T> singleOperandCondition = (Condition.SingleOperandCondition<T>) condition;
       T value = singleOperandCondition.operand;
@@ -87,6 +87,19 @@ class FilterConverter {
       }
     } else {
       throw new IllegalArgumentException("Unsupported condition: " + condition.getClass());
+    }
+  }
+
+  private static String operationNameToSql(Condition.MultiOperandConditionName operationName) {
+    switch (operationName) {
+      case AND:
+        return " AND ";
+      case OR:
+        return " OR ";
+      case NOT:
+        return " NOT ";
+      default:
+        throw new IllegalStateException("Unexpected value: " + operationName);
     }
   }
 }
