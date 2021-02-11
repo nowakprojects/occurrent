@@ -1,15 +1,19 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
+import com.mongodb.ConnectionString;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.occurrent.domain.DomainEvent;
 import org.occurrent.domain.NameDefined;
 import org.occurrent.domain.NameWasChanged;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
+import org.occurrent.filter.Filter;
+import org.occurrent.testsupport.mongodb.FlushMongoDBExtension;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -24,10 +28,12 @@ import java.util.UUID;
 
 import static org.occurrent.filter.Filter.type;
 
+//TODO: Flush database after test!
 @Timeout(10)
 @Testcontainers
 class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupport {
 
+  public static final String EVENT_STORE_TABLE_NAME = "occurrent_cloud_events";
   @Container
   private static final PostgreSQLContainer<?> postgreSQLContainer;
 
@@ -42,13 +48,21 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
     postgreSQLContainer.setPortBindings(ports);
   }
 
+  @RegisterExtension
+  FlushSqlDbExtension flushSqlDbExtension = new FlushSqlDbExtension(
+      postgreSQLContainer.getJdbcUrl(),
+      postgreSQLContainer.getUsername(),
+      postgreSQLContainer.getPassword(),
+      EVENT_STORE_TABLE_NAME
+  );
+
   private SpringReactorSqlEventStore eventStore;
 
   @BeforeEach
   void create_event_store() {
     eventStore = EventStoreFixture
         .connectedTo(postgreSQLContainer)
-        .eventStoreInstance(new PostgresSqlEventStoreConfig("occurrent_cloud_events"));
+        .eventStoreInstance(new PostgresSqlEventStoreConfig(EVENT_STORE_TABLE_NAME));
   }
 
   @Nested
@@ -78,10 +92,11 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
     void count_with_filter_returns_only_events_that_matches_the_filter() {
       // Given
       LocalDateTime now = LocalDateTime.now();
+      String eventStreamId = anStreamId();
       DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
       DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
       DomainEvent event3 = new NameDefined(UUID.randomUUID().toString(), now, "Hello Doe");
-      writeEvents("name", Arrays.asList(event1, event2, event3));
+      writeEvents(eventStreamId, Arrays.asList(event1, event2, event3));
 
       // When
       final Mono<Long> filteredEventsCount = eventStore.count(type(NameDefined.class.getName()));
@@ -89,6 +104,66 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
       // Then
       StepVerifier.create(filteredEventsCount)
           .expectNext(2L)
+          .verifyComplete();
+    }
+  }
+
+  @Nested
+  @DisplayName("exists")
+  class ExistsTest {
+
+    @Test
+    void returns_false_when_there_are_no_events_in_the_event_store_and_filter_is_all() {
+      StepVerifier.create(eventStore.exists(Filter.all()))
+          .expectNext(false)
+          .verifyComplete();
+    }
+
+    @Test
+    void returns_true_when_there_are_events_in_the_event_store_and_filter_is_all() {
+      LocalDateTime now = LocalDateTime.now();
+      String eventStreamId = anStreamId();
+      DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+      DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+      DomainEvent event3 = new NameDefined(UUID.randomUUID().toString(), now, "Hello Doe");
+      writeEvents(eventStreamId, Arrays.asList(event1, event2, event3));
+
+      StepVerifier.create(eventStore.exists(Filter.all()))
+          .expectNext(true)
+          .verifyComplete();
+    }
+
+    @Test
+    void returns_false_when_there_are_no_events_in_the_event_store_and_filter_is_not_all() {
+      StepVerifier.create(eventStore.exists(type(NameDefined.class.getName())))
+          .expectNext(false)
+          .verifyComplete();
+    }
+
+    @Test
+    void returns_true_when_there_are_matching_events_in_the_event_store_and_filter_not_all() {
+      LocalDateTime now = LocalDateTime.now();
+      String eventStreamId = anStreamId();
+      DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+      DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+      DomainEvent event3 = new NameDefined(UUID.randomUUID().toString(), now, "Hello Doe");
+      writeEvents(eventStreamId, Arrays.asList(event1, event2, event3));
+
+      StepVerifier.create(eventStore.exists(type(NameDefined.class.getName())))
+          .expectNext(true)
+          .verifyComplete();
+    }
+
+    @Test
+    void returns_false_when_there_events_in_the_event_store_that_doesnt_match_filter() {
+      LocalDateTime now = LocalDateTime.now();
+      String eventStreamId = anStreamId();
+      DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+      DomainEvent event2 = new NameDefined(UUID.randomUUID().toString(), now, "Hello Doe");
+      writeEvents(eventStreamId, Arrays.asList(event1, event2));
+
+      StepVerifier.create(eventStore.exists(type(NameWasChanged.class.getName())))
+          .expectNext(false)
           .verifyComplete();
     }
   }
