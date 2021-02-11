@@ -3,6 +3,7 @@ package org.occurrent.eventstore.sql.spring.reactor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.cloudevents.CloudEvent;
 import io.cloudevents.core.builder.CloudEventBuilder;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -15,10 +16,12 @@ import org.occurrent.eventstore.api.DuplicateCloudEventException;
 import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.time.LocalDateTime;
@@ -26,7 +29,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
+import static org.occurrent.eventstore.sql.spring.reactor.CloudEventsDeserializer.deserialize;
 
 @Timeout(10)
 @Testcontainers
@@ -46,12 +57,14 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
     postgreSQLContainer.setPortBindings(ports);
   }
 
+  private EventStoreFixture eventStoreFixture;
   private EventStore eventStore;
 
   @BeforeEach
   void create_event_store() {
-    eventStore = EventStoreFixture
-        .connectedTo(postgreSQLContainer)
+    eventStoreFixture = EventStoreFixture
+        .connectedTo(postgreSQLContainer);
+    eventStore = eventStoreFixture
         .eventStoreInstance(new PostgresSqlEventStoreConfig("occurrent_cloud_events"));
   }
 
@@ -191,6 +204,67 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
   //TODO: read_skew_is_avoided_and_transaction_is_started
   //TODO: read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started
 
+  @Test
+  void read_skew_is_avoided_and_transaction_is_started() {
+    // Given
+    LocalDateTime now = LocalDateTime.now();
+    NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+    NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
+    NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(2), "name3");
+
+    persist("name", WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
+
+    TransactionalOperator transactionalOperator = TransactionalOperator.create(eventStoreFixture.transactionManager());
+    CountDownLatch countDownLatch = new CountDownLatch(1);
+
+    AtomicReference<VersionAndEvents> versionAndEventsRef = new AtomicReference<>();
+
+    // When
+    transactionalOperator.execute(__ -> eventStore.read("name")
+        .flatMap(es -> es.events().collectList().map(eventList -> {
+          await(countDownLatch);
+          return new VersionAndEvents(es.version(), eventList.stream().map(deserialize()).collect(Collectors.toList()));
+        }))
+        .doOnNext(versionAndEventsRef::set))
+        .subscribe();
+
+    transactionalOperator.execute(__ -> persist("name", WriteCondition.streamVersionEq(2), nameWasChanged2)
+        .then(Mono.fromRunnable(countDownLatch::countDown)).then())
+        .blockFirst();
+
+    // Then
+    VersionAndEvents versionAndEvents = Awaitility.await().untilAtomic(versionAndEventsRef, not(nullValue()));
+
+    assertAll(
+        () -> assertThat(versionAndEvents.version).describedAs("version").isEqualTo(2L),
+        () -> assertThat(versionAndEvents.events).containsExactly(nameDefined, nameWasChanged1)
+    );
+  }
+
+  @Test
+  void read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started() {
+    // Given
+    LocalDateTime now = LocalDateTime.now();
+    NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+    NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
+    NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(2), "name3");
+
+    persist("name", WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
+
+    // When
+    VersionAndEvents versionAndEvents =
+        eventStore.read("name", 0, 2)
+            .flatMap(es -> persist("name", WriteCondition.streamVersionEq(2), nameWasChanged2)
+                .then(es.events().collectList())
+                .map(eventList -> new VersionAndEvents(es.version(), eventList.stream().map(deserialize()).collect(Collectors.toList()))))
+            .block();
+    // Then
+    assert versionAndEvents != null;
+    assertAll(
+        () -> assertThat(versionAndEvents.version).describedAs("version").isEqualTo(2L),
+        () -> assertThat(versionAndEvents.events).containsExactly(nameDefined, nameWasChanged1)
+    );
+  }
 
   @Override
   public EventStore eventStore() {

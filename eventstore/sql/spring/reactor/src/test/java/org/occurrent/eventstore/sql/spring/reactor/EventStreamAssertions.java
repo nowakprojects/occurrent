@@ -1,6 +1,5 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.cloudevents.CloudEvent;
 import org.occurrent.domain.DomainEvent;
 import org.occurrent.eventstore.api.reactor.EventStream;
@@ -15,9 +14,10 @@ import java.util.List;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static org.occurrent.eventstore.sql.spring.reactor.CloudEventsDeserializer.deserialize;
+
 class EventStreamAssertions {
 
-  private static final ObjectMapper objectMapper = new ObjectMapper();
   private final Mono<EventStream<CloudEvent>> eventStream;
 
   private EventStreamAssertions(Mono<EventStream<CloudEvent>> eventStream) {
@@ -69,17 +69,5 @@ class EventStreamAssertions {
     hasNoEvents();
   }
 
-  private static Function<CloudEvent, DomainEvent> deserialize() {
-    return CheckedFunction.unchecked(EventStreamAssertions::deserialize);
-  }
-
-  @SuppressWarnings({"unchecked", "ConstantConditions"})
-  private static <T extends DomainEvent> T deserialize(CloudEvent cloudEvent) {
-    try {
-      return (T) objectMapper.readValue(cloudEvent.getData().toBytes(), Class.forName(cloudEvent.getType()));
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-  }
 
 }

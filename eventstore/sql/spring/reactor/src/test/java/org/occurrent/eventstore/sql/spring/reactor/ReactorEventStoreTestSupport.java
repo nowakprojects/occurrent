@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 
 import static java.time.ZoneOffset.UTC;
 import static org.occurrent.eventstore.sql.spring.reactor.Constants.NAME_SOURCE;
@@ -103,5 +104,13 @@ interface ReactorEventStoreTestSupport {
   default byte[] serializeEvent(DomainEvent domainEvent) {
     ObjectMapper objectMapper = new ObjectMapper();
     return CheckedFunction.unchecked(objectMapper::writeValueAsBytes).apply(domainEvent);
+  }
+
+  default void await(CountDownLatch countDownLatch) {
+    try {
+      countDownLatch.await();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    }
   }
 }
