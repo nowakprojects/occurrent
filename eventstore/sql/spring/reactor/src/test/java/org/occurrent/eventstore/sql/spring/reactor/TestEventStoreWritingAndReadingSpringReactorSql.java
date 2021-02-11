@@ -1,8 +1,5 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.cloudevents.CloudEvent;
-import io.cloudevents.core.builder.CloudEventBuilder;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -201,18 +198,17 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
   }
 
   //https://www.youtube.com/watch?v=8fVw-XzkW1E
-  //TODO: read_skew_is_avoided_and_transaction_is_started
-  //TODO: read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started
 
   @Test
   void read_skew_is_avoided_and_transaction_is_started() {
     // Given
+    String eventStreamId = anStreamId();
     LocalDateTime now = LocalDateTime.now();
     NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
     NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
     NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(2), "name3");
 
-    persist("name", WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
+    persist(eventStreamId, WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
 
     TransactionalOperator transactionalOperator = TransactionalOperator.create(eventStoreFixture.transactionManager());
     CountDownLatch countDownLatch = new CountDownLatch(1);
@@ -220,7 +216,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
     AtomicReference<VersionAndEvents> versionAndEventsRef = new AtomicReference<>();
 
     // When
-    transactionalOperator.execute(__ -> eventStore.read("name")
+    transactionalOperator.execute(__ -> eventStore.read(eventStreamId)
         .flatMap(es -> es.events().collectList().map(eventList -> {
           await(countDownLatch);
           return new VersionAndEvents(es.version(), eventList.stream().map(deserialize()).collect(Collectors.toList()));
@@ -228,7 +224,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
         .doOnNext(versionAndEventsRef::set))
         .subscribe();
 
-    transactionalOperator.execute(__ -> persist("name", WriteCondition.streamVersionEq(2), nameWasChanged2)
+    transactionalOperator.execute(__ -> persist(eventStreamId, WriteCondition.streamVersionEq(2), nameWasChanged2)
         .then(Mono.fromRunnable(countDownLatch::countDown)).then())
         .blockFirst();
 
@@ -244,17 +240,18 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
   @Test
   void read_skew_is_avoided_and_skip_and_limit_is_defined_even_when_no_transaction_is_started() {
     // Given
+    String eventStreamId = anStreamId();
     LocalDateTime now = LocalDateTime.now();
     NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
     NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
     NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(2), "name3");
 
-    persist("name", WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
+    persist(eventStreamId, WriteCondition.streamVersionEq(0), Flux.just(nameDefined, nameWasChanged1)).block();
 
     // When
     VersionAndEvents versionAndEvents =
-        eventStore.read("name", 0, 2)
-            .flatMap(es -> persist("name", WriteCondition.streamVersionEq(2), nameWasChanged2)
+        eventStore.read(eventStreamId, 0, 2)
+            .flatMap(es -> persist(eventStreamId, WriteCondition.streamVersionEq(2), nameWasChanged2)
                 .then(es.events().collectList())
                 .map(eventList -> new VersionAndEvents(es.version(), eventList.stream().map(deserialize()).collect(Collectors.toList()))))
             .block();

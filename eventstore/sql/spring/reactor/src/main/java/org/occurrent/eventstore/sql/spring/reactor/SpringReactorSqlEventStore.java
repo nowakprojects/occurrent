@@ -127,9 +127,7 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
   }
 
   private Mono<Long> currentStreamVersion(String streamId) {
-    String sql = "SELECT streamversion FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid ORDER BY streamversion DESC LIMIT 1";
-    //String sql = "SELECT MAX(streamversion) FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid";
-
+    String sql = "SELECT COALESCE(MAX(streamversion),0) FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE streamid = :streamid";
 
     return databaseClient.sql(sql)
         .bind("streamid", streamId)
