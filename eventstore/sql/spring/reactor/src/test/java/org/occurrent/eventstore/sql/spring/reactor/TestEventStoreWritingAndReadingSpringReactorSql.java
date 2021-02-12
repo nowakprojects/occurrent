@@ -1,7 +1,10 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
+import io.cloudevents.CloudEvent;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.occurrent.domain.Composition;
@@ -11,7 +14,9 @@ import org.occurrent.domain.NameDefined;
 import org.occurrent.domain.NameWasChanged;
 import org.occurrent.eventstore.api.DuplicateCloudEventException;
 import org.occurrent.eventstore.api.WriteCondition;
+import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
 import org.occurrent.eventstore.api.reactor.EventStore;
+import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -31,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
@@ -262,6 +268,57 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
         () -> assertThat(versionAndEvents.version).describedAs("version").isEqualTo(2L),
         () -> assertThat(versionAndEvents.events).containsExactly(nameDefined, nameWasChanged1)
     );
+  }
+
+  @Nested
+  @DisplayName("Conditionally Write to Event Store")
+  class ConditionallyWriteToEventStore {
+
+    LocalDateTime now = LocalDateTime.now();
+
+    @Nested
+    @DisplayName("eq")
+    class Eq {
+
+      @Test
+      void writes_events_when_stream_version_matches_expected_version() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+
+        //When
+        thenEventStream(eventStreamId)
+            .hasVersion(1L);
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersionEq(1L));
+
+        //Then
+        thenEventStream(eventStreamId)
+            .hasVersion(2L)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void throws_write_condition_not_fulfilled_when_stream_version_does_not_match_expected_version() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersionEq(10), event2);
+
+        // Then
+        StepVerifier.create(writeEvents)
+            .verifyErrorSatisfies(thrown ->
+                assertThat(thrown)
+                    .isExactlyInstanceOf(WriteConditionNotFulfilledException.class)
+                    .hasMessage("WriteCondition was not fulfilled. Expected version to be equal to 10 but was 1.")
+            );
+      }
+    }
   }
 
   @Override

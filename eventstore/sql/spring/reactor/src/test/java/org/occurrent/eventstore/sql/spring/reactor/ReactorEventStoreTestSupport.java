@@ -31,6 +31,10 @@ interface ReactorEventStoreTestSupport {
     writeEvents(eventStreamId, events, WriteCondition.anyStreamVersion());
   }
 
+  default void writeEvents(String eventStreamId, DomainEvent events) {
+    writeEvents(eventStreamId, events, WriteCondition.anyStreamVersion());
+  }
+
   default void writeEvents(String eventStreamId, List<DomainEvent> events, WriteCondition writeCondition) {
     StepVerifier.create(persist(eventStreamId, writeCondition, events))
         .verifyComplete();
