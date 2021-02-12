@@ -6,6 +6,7 @@ import io.cloudevents.core.builder.CloudEventBuilder;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Row;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
+import org.occurrent.cloudevents.OccurrentExtensionGetter;
 import org.occurrent.eventstore.api.LongConditionEvaluator;
 import org.occurrent.eventstore.api.WriteCondition;
 import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
@@ -28,6 +29,7 @@ import reactor.util.function.Tuple2;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.time.OffsetDateTime;
+import java.util.Objects;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
@@ -158,7 +160,40 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Mono<CloudEvent> updateEvent(String cloudEventId, URI cloudEventSource, Function<CloudEvent, CloudEvent> updateFunction) {
-    return null;
+    String selectCurrentEventSql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " WHERE id = :id AND source = :source";
+    String updateSql = "UPDATE " + sqlEventStoreConfig.eventStoreTableName() + " SET specversion = :specversion, type = :type, datacontenttype = :datacontenttype, dataschema = :dataschema, subject = :subject, streamid = :streamid, streamversion = :streamversion, data = :data, time = :time WHERE id = :id AND source = :source";
+    final Mono<CloudEvent> selectCurrentCloudEvent = databaseClient.sql(selectCurrentEventSql)
+        .bind("id", cloudEventId)
+        .bind("source", cloudEventSource.toString())
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .one()
+        .flatMap(cloudEventMono -> cloudEventMono);
+    final Mono<CloudEvent> updateCloudEvent = selectCurrentCloudEvent
+        .flatMap(currentCloudEvent -> {
+          CloudEvent updatedCloudEvent = updateFunction.apply(currentCloudEvent);
+          if (updatedCloudEvent == null) {
+            return Mono.error(new IllegalArgumentException("Cloud event update function is not allowed to return null"));
+          }
+          if (Objects.equals(updatedCloudEvent, currentCloudEvent)) {
+            return Mono.empty();
+          }
+          String streamId = OccurrentExtensionGetter.getStreamId(currentCloudEvent);
+          long streamVersion = OccurrentExtensionGetter.getStreamVersion(currentCloudEvent);
+          return databaseClient.sql(updateSql)
+              .bind("specversion", updatedCloudEvent.getSpecVersion().toString())
+              .bind("type", updatedCloudEvent.getType())
+              .bind("datacontenttype", updatedCloudEvent.getDataContentType())
+              .bind("dataschema", Parameter.fromOrEmpty(updatedCloudEvent.getDataSchema(), URI.class))
+              .bind("subject", updatedCloudEvent.getSubject())
+              .bind(OccurrentCloudEventExtension.STREAM_ID, Parameter.fromOrEmpty(streamId, String.class))
+              .bind(OccurrentCloudEventExtension.STREAM_VERSION, Parameter.fromOrEmpty(streamVersion, String.class))
+              .bind("data", Parameter.fromOrEmpty(updatedCloudEvent.getData() != null ? updatedCloudEvent.getData().toBytes() : null, Object.class))
+              .bind("time", updatedCloudEvent.getTime())
+              .bind("id", cloudEventId)
+              .bind("source", cloudEventSource.toString())
+              .then().thenReturn(updatedCloudEvent);
+        });
+    return updateCloudEvent.as(transactionalOperator::transactional);
   }
 
   @Override
