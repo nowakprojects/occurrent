@@ -12,6 +12,7 @@ import org.occurrent.domain.DomainEvent;
 import org.occurrent.domain.NameDefined;
 import org.occurrent.domain.NameWasChanged;
 import org.occurrent.eventstore.api.reactor.EventStore;
+import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.sql.common.PostgresSqlEventStoreConfig;
 import org.occurrent.filter.Filter;
 import org.occurrent.testsupport.mongodb.FlushMongoDBExtension;
@@ -38,7 +39,6 @@ import static org.occurrent.filter.Filter.streamId;
 import static org.occurrent.filter.Filter.time;
 import static org.occurrent.filter.Filter.type;
 
-//TODO: Flush database after test!
 @Timeout(10)
 @Testcontainers
 class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupport {
@@ -76,7 +76,7 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
   }
 
   @Nested
-  @DisplayName("count")
+  @DisplayName("count events")
   class CountTest {
 
     @Test
@@ -119,8 +119,8 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
   }
 
   @Nested
-  @DisplayName("exists")
-  class ExistsTest {
+  @DisplayName("event exists")
+  class EventExists {
 
     @Test
     void returns_false_when_there_are_no_events_in_the_event_store_and_filter_is_all() {
@@ -179,85 +179,29 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
   }
 
   @Nested
-  @DisplayName("deletion")
-  class Delete {
+  @DisplayName("stream exists")
+  class StreamExists {
 
     @Test
-    void deleteEventStream_deletes_all_events_in_event_stream() {
-      // Given
+    void returns_true_when_stream_exists_and_contains_events() {
       LocalDateTime now = LocalDateTime.now();
       String eventStreamId = anStreamId();
       NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
       NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
       writeEvents(eventStreamId, Arrays.asList(nameDefined, nameWasChanged1));
-
-      // When
-      StepVerifier.create(eventStore.deleteEventStream(eventStreamId))
-          .verifyComplete();
-
-      // Then
-      thenEventStream(eventStreamId)
-          .hasVersion(0)
-          .hasNoEvents();
-
-      StepVerifier.create(eventStore.exists(eventStreamId))
-          .expectNext(false)
-          .verifyComplete();
-
-      StepVerifier.create(eventStore.count(Filter.streamId(eventStreamId)))
-          .expectNext(0L)
-          .verifyComplete();
-    }
-
-    @Test
-    void deleteEvent_deletes_only_specific_event_in_event_stream() {
-      // Given
-      LocalDateTime now = LocalDateTime.now();
-      String eventStreamId = anStreamId();
-      NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
-      NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
-      writeEvents(eventStreamId, Arrays.asList(nameDefined, nameWasChanged1));
-
-      // When
-      StepVerifier.create(eventStore.deleteEvent(nameWasChanged1.getEventId(), NAME_SOURCE))
-          .verifyComplete();
-
-      // Then
-      thenEventStream(eventStreamId)
-          .hasVersion(1)
-          .hasOnlyEvent(nameDefined);
 
       StepVerifier.create(eventStore.exists(eventStreamId))
           .expectNext(true)
           .verifyComplete();
-
-      StepVerifier.create(eventStore.count(Filter.streamId(eventStreamId)))
-          .expectNext(1L)
-          .verifyComplete();
     }
 
     @Test
-    void delete_deletes_events_according_to_the_filter() {
-      // Given
-      LocalDateTime now = LocalDateTime.now();
+    void returns_false_when_no_events_have_been_persisted_to_stream() {
       String eventStreamId = anStreamId();
-      String anotherEventStreamId = anStreamId();
-      NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
-      NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
-      writeEvents(eventStreamId, Arrays.asList(nameDefined, nameWasChanged1));
 
-      NameDefined nameDefined2 = new NameDefined(UUID.randomUUID().toString(), now, "name2");
-      writeEvents(anotherEventStreamId, Collections.singletonList(nameDefined2));
-
-      // When
-      eventStore.delete(streamId(eventStreamId).and(time(lte(now.atOffset(UTC).plusMinutes(1))))).block();
-
-      // Then
-      thenEventStream(eventStreamId)
-          .hasOnlyEvent(nameWasChanged1);
-
-      thenEventStream(anotherEventStreamId)
-          .hasOnlyEvent(nameDefined2);
+      StepVerifier.create(eventStore.exists(eventStreamId))
+          .expectNext(false)
+          .verifyComplete();
     }
   }
 

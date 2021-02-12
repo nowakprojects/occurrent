@@ -33,6 +33,7 @@ import java.util.function.Function;
 import static java.util.Objects.requireNonNull;
 import static org.occurrent.eventstore.api.WriteCondition.anyStreamVersion;
 
+//TODO: Consider Spring framework agnostic - just R2DBC
 //https://hantsy.medium.com/introduction-to-r2dbc-82058417644b
 //https://medium.com/swlh/working-with-relational-database-using-r2dbc-databaseclient-d61a60ebc67f
 //https://hantsy.medium.com/
