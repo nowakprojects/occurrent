@@ -52,14 +52,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
   private static final PostgreSQLContainer<?> postgreSQLContainer;
 
   static {
-    postgreSQLContainer = new PostgreSQLContainer<>("postgres:13-alpine")
-        .withDatabaseName("occurrent")
-        .withUsername("occurrent-user")
-        .withPassword("occurrent-password")
-        .withExposedPorts(5432);
-    List<String> ports = new ArrayList<>();
-    ports.add("5432:5432");
-    postgreSQLContainer.setPortBindings(ports);
+    postgreSQLContainer = Containers.postgreSql();
   }
 
   private EventStoreFixture eventStoreFixture;
