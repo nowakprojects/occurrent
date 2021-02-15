@@ -1,11 +1,13 @@
 package org.occurrent.eventstore.sql.spring.reactor;
 
+import io.cloudevents.CloudEvent;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.occurrent.condition.Condition;
 import org.occurrent.domain.Composition;
 import org.occurrent.domain.DomainEvent;
 import org.occurrent.domain.Name;
@@ -35,13 +37,18 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.occurrent.condition.Condition.and;
+import static org.occurrent.condition.Condition.eq;
 import static org.occurrent.condition.Condition.gt;
+import static org.occurrent.condition.Condition.gte;
 import static org.occurrent.condition.Condition.lt;
 import static org.occurrent.condition.Condition.lte;
 import static org.occurrent.condition.Condition.ne;
+import static org.occurrent.condition.Condition.or;
 import static org.occurrent.eventstore.sql.spring.reactor.CloudEventsDeserializer.deserialize;
 
 @Timeout(10)
@@ -346,7 +353,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(anEventId(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(ne(1L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(ne(1L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -387,7 +394,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lt(0L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lt(0L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -406,7 +413,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lt(1L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lt(1L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -447,7 +454,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(gt(100L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(gt(100L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -468,7 +475,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(gt(1L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(gt(1L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -525,7 +532,7 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
 
         // When
         DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
-        final Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lte(0L)), event2);
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(lte(0L)), event2);
 
         // Then
         StepVerifier.create(writeEvents)
@@ -535,6 +542,182 @@ class TestEventStoreWritingAndReadingSpringReactorSql implements ReactorEventSto
             );
       }
     }
+
+    @Nested
+    @DisplayName("gte")
+    class Gte {
+
+      @Test
+      void writes_events_when_stream_version_is_greater_than_expected_version() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersion(gte(0L)));
+
+        // Then
+        thenEventStream(eventStreamId)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void writes_events_when_stream_version_is_equal_to_expected_version() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersion(gte(0L)));
+
+        // Then
+        thenEventStream(eventStreamId)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void throws_write_condition_not_fulfilled_when_stream_version_is_less_than_expected_version() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(gte(100L)), event2);
+
+        // Then
+        StepVerifier.create(writeEvents)
+            .verifyErrorSatisfies(thrown -> assertThat(thrown)
+                .isExactlyInstanceOf(WriteConditionNotFulfilledException.class)
+                .hasMessage("WriteCondition was not fulfilled. Expected version to be greater than or equal to 100 but was 1.")
+            );
+      }
+    }
+
+    @Nested
+    @DisplayName("and")
+    class And {
+
+      @Test
+      void writes_events_when_stream_version_is_when_all_conditions_match_and_expression() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        //When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersion(and(gte(0L), lt(100L), ne(40L))));
+
+        // Then
+        thenEventStream(eventStreamId)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void throws_write_condition_not_fulfilled_when_any_of_the_operations_in_the_and_expression_is_not_fulfilled() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(and(gte(0L), lt(100L), ne(1L))), event2);
+
+        // Then
+        StepVerifier.create(writeEvents)
+            .verifyErrorSatisfies(thrown -> assertThat(thrown)
+                .isExactlyInstanceOf(WriteConditionNotFulfilledException.class)
+                .hasMessage("WriteCondition was not fulfilled. Expected version to be greater than or equal to 0 and to be less than 100 and to not be equal to 1 but was 1.")
+            );
+      }
+    }
+
+    @Nested
+    @DisplayName("or")
+    class Or {
+
+      @Test
+      void writes_events_when_stream_version_is_when_any_condition_in_or_expression_matches() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        //When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersion(or(gte(100L), lt(0L), ne(40L))));
+
+        // Then
+        thenEventStream(eventStreamId)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void throws_write_condition_not_fulfilled_when_none_of_the_operations_in_the_and_expression_is_fulfilled() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(or(gte(100L), lt(1L))), event2);
+
+        // Then
+        StepVerifier.create(writeEvents)
+            .verifyErrorSatisfies(thrown -> assertThat(thrown)
+                .isExactlyInstanceOf(WriteConditionNotFulfilledException.class)
+                .hasMessage("WriteCondition was not fulfilled. Expected version to be greater than or equal to 100 or to be less than 1 but was 1.")
+            );
+      }
+    }
+
+    @Nested
+    @DisplayName("not")
+    class Not {
+
+      @Test
+      void writes_events_when_stream_version_is_not_matching_condition() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        //When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        writeEvents(eventStreamId, event2, WriteCondition.streamVersion(Condition.not(eq(100L))));
+
+        // Then
+        thenEventStream(eventStreamId)
+            .hasOnlyEvents(event1, event2);
+      }
+
+      @Test
+      void throws_write_condition_not_fulfilled_when_condition_is_fulfilled_but_should_not_be_so() {
+        // Given
+        String eventStreamId = anStreamId();
+        DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+        writeEvents(eventStreamId, event1);
+
+        // When
+        DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+        Mono<Void> writeEvents = persist(eventStreamId, WriteCondition.streamVersion(Condition.not(eq(1L))), event2);
+
+        // Then
+        StepVerifier.create(writeEvents)
+            .verifyErrorSatisfies(thrown -> assertThat(thrown)
+                .isExactlyInstanceOf(WriteConditionNotFulfilledException.class)
+                .hasMessage("WriteCondition was not fulfilled. Expected version not to be equal to 1 but was 1.")
+            );
+      }
+    }
+
   }
 
   @Override

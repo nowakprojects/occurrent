@@ -198,6 +198,8 @@ class TestEventStoreQueriesSpringReactorSql implements ReactorEventStoreTestSupp
     }
   }
 
+  //TODO: QueriesTest
+
   @Override
   public EventStore eventStore() {
     return this.eventStore;
