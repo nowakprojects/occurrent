@@ -198,7 +198,26 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
 
   @Override
   public Flux<CloudEvent> query(Filter filter, int skip, int limit, SortBy sortBy) {
-    return null;
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter) + toOrderBySql(sortBy) + " LIMIT :limit OFFSET :offset";
+    return databaseClient.sql(sql)
+        .bind("limit", limit)
+        .bind("offset", skip)
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .all()
+        .flatMap(cloudEventMono -> cloudEventMono);
+  }
+
+  private String toOrderBySql(SortBy sortBy) {
+    if (sortBy == SortBy.NATURAL_ASC || sortBy == SortBy.NATURAL_DESC) {
+      return "";
+    }
+    if (sortBy == SortBy.TIME_ASC) {
+      return " ORDER BY time ASC ";
+    }
+    if (sortBy == SortBy.TIME_DESC) {
+      return " ORDER BY time DESC ";
+    }
+    return "";
   }
 
   @Override
@@ -236,6 +255,35 @@ class SpringReactorSqlEventStore implements EventStore, EventStoreOperations, Ev
             .flatMap(streamVersion -> Mono.just(new EventStreamEntity(streamId, streamVersion, cloudEvents)))
             .defaultIfEmpty(new EventStreamEntity(streamId, 0L, Flux.empty()))
     ).single().map(cloudEvent -> cloudEvent);
+  }
+
+  @Override
+  public Flux<CloudEvent> all() {
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName();
+    return databaseClient.sql(sql)
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .all()
+        .flatMap(cloudEventMono -> cloudEventMono);
+  }
+
+  @Override //TODO: How to implement data? Bloba is not good for querying?
+  public Flux<CloudEvent> query(Filter filter) {
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + FilterConverter.convertFilterToWhereClause(filter);
+    return databaseClient.sql(sql)
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .all()
+        .flatMap(cloudEventMono -> cloudEventMono);
+  }
+
+  @Override
+  public Flux<CloudEvent> all(int skip, int limit) {
+    String sql = "SELECT * FROM " + sqlEventStoreConfig.eventStoreTableName() + " LIMIT :limit OFFSET :offset";
+    return databaseClient.sql(sql)
+        .bind("limit", limit)
+        .bind("offset", skip)
+        .map(SpringReactorSqlEventStore::eventStreamRowMapper)
+        .all()
+        .flatMap(cloudEventMono -> cloudEventMono);
   }
 
   private static Mono<CloudEvent> eventStreamRowMapper(Row row) {
