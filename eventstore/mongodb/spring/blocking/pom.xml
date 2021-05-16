@@ -19,7 +19,7 @@
     <parent>
         <artifactId>eventstore-mongodb-spring</artifactId>
         <groupId>org.occurrent</groupId>
-        <version>0.7.3-SNAPSHOT</version>
+        <version>0.10.1-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -29,17 +29,22 @@
         <dependency>
             <groupId>org.occurrent</groupId>
             <artifactId>eventstore-api-blocking</artifactId>
-            <version>0.7.3-SNAPSHOT</version>
+            <version>0.10.1-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.occurrent</groupId>
             <artifactId>eventstore-mongodb-common</artifactId>
-            <version>0.7.3-SNAPSHOT</version>
+            <version>0.10.1-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.occurrent</groupId>
             <artifactId>mongodb-spring-filter-query-conversion</artifactId>
-            <version>0.7.3-SNAPSHOT</version>
+            <version>0.10.1-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>org.occurrent</groupId>
+            <artifactId>mongodb-spring-sort-conversion</artifactId>
+            <version>0.10.1-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.data</groupId>
@@ -89,7 +94,7 @@
         <dependency>
             <groupId>org.occurrent</groupId>
             <artifactId>test-support</artifactId>
-            <version>0.7.3-SNAPSHOT</version>
+            <version>0.10.1-SNAPSHOT</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -102,5 +107,10 @@
             <artifactId>rerunner-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-    </dependencies>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>     
 </project>

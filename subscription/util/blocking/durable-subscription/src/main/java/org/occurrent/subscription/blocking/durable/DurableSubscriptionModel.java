@@ -23,8 +23,8 @@ import org.occurrent.subscription.SubscriptionPosition;
 import org.occurrent.subscription.api.blocking.*;
 
 import javax.annotation.PreDestroy;
+import java.util.Objects;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
 import static org.occurrent.subscription.PositionAwareCloudEvent.getSubscriptionPositionOrThrowIAE;
@@ -40,7 +40,7 @@ import static org.occurrent.subscription.util.predicate.EveryN.everyEvent;
  * Note that this implementation stores the subscription position after _every_ action. If you have a lot of events and duplication is not
  * that much of a deal, consider changing this behavior by supplying an instance of {@link DurableSubscriptionModelConfig}.
  */
-public class DurableSubscriptionModel implements PositionAwareSubscriptionModel, DelegatingSubscriptionModel, SubscriptionModelCancelSubscription {
+public class DurableSubscriptionModel implements PositionAwareSubscriptionModel, DelegatingSubscriptionModel {
 
     private final PositionAwareSubscriptionModel subscriptionModel;
     private final SubscriptionPositionStorage storage;
@@ -76,8 +76,28 @@ public class DurableSubscriptionModel implements PositionAwareSubscriptionModel,
     }
 
     @Override
-    public Subscription subscribe(String subscriptionId, SubscriptionFilter filter, Supplier<StartAt> startAtSupplier, Consumer<CloudEvent> action) {
-        return subscriptionModel.subscribe(subscriptionId, filter, startAtSupplier, cloudEvent -> {
+    public Subscription subscribe(String subscriptionId, SubscriptionFilter filter, StartAt startAt, Consumer<CloudEvent> action) {
+        Objects.requireNonNull(startAt, StartAt.class.getSimpleName() + " supplier cannot be null");
+
+        final StartAt startAtToUse;
+        if (startAt.isDefault()) {
+            startAtToUse = StartAt.dynamic(() -> {
+                // It's important that we find the document inside the supplier so that we lookup the latest resume token on retry
+                SubscriptionPosition subscriptionPosition = storage.read(subscriptionId);
+                if (subscriptionPosition == null) {
+                    SubscriptionPosition globalSubscriptionPosition = subscriptionModel.globalSubscriptionPosition();
+                    if (globalSubscriptionPosition != null) {
+                        subscriptionPosition = storage.save(subscriptionId, globalSubscriptionPosition);
+                    }
+                }
+
+                return subscriptionPosition == null ? StartAt.subscriptionModelDefault() : StartAt.subscriptionPosition(subscriptionPosition);
+            });
+        } else {
+            startAtToUse = startAt;
+        }
+
+        return subscriptionModel.subscribe(subscriptionId, filter, startAtToUse, cloudEvent -> {
                     action.accept(cloudEvent);
                     if (config.persistCloudEventPositionPredicate.test(cloudEvent)) {
                         SubscriptionPosition subscriptionPosition = getSubscriptionPositionOrThrowIAE(cloudEvent);
@@ -88,31 +108,38 @@ public class DurableSubscriptionModel implements PositionAwareSubscriptionModel,
     }
 
     @Override
-    public Subscription subscribe(String subscriptionId, Consumer<CloudEvent> action) {
-        return subscribe(subscriptionId, (SubscriptionFilter) null, action);
+    public void stop() {
+        getDelegatedSubscriptionModel().stop();
     }
 
-    /**
-     * Start listening to cloud events persisted to the event store.
-     *
-     * @param subscriptionId The id of the subscription, must be unique!
-     * @param filter         The filter to apply for this subscription. Only events matching the filter will cause the <code>action</code> to be called.
-     * @param action         This action will be invoked for each cloud event that is stored in the EventStore that matches the supplied <code>filter</code>.
-     */
     @Override
-    public Subscription subscribe(String subscriptionId, SubscriptionFilter filter, Consumer<CloudEvent> action) {
-        Supplier<StartAt> startAtSupplier = () -> {
-            // It's important that we find the document inside the supplier so that we lookup the latest resume token on retry
-            SubscriptionPosition subscriptionPosition = storage.read(subscriptionId);
-            if (subscriptionPosition == null) {
-                SubscriptionPosition globalSubscriptionPosition = subscriptionModel.globalSubscriptionPosition();
-                if (globalSubscriptionPosition != null) {
-                    subscriptionPosition = storage.save(subscriptionId, globalSubscriptionPosition);
-                }
-            }
-            return subscriptionPosition == null ? StartAt.now() : StartAt.subscriptionPosition(subscriptionPosition);
-        };
-        return subscribe(subscriptionId, filter, startAtSupplier, action);
+    public void start() {
+        getDelegatedSubscriptionModel().start();
+    }
+
+    @Override
+    public boolean isRunning() {
+        return getDelegatedSubscriptionModel().isRunning();
+    }
+
+    @Override
+    public boolean isRunning(String subscriptionId) {
+        return getDelegatedSubscriptionModel().isRunning(subscriptionId);
+    }
+
+    @Override
+    public boolean isPaused(String subscriptionId) {
+        return getDelegatedSubscriptionModel().isPaused(subscriptionId);
+    }
+
+    @Override
+    public Subscription resumeSubscription(String subscriptionId) {
+        return getDelegatedSubscriptionModel().resumeSubscription(subscriptionId);
+    }
+
+    @Override
+    public void pauseSubscription(String subscriptionId) {
+        getDelegatedSubscriptionModel().pauseSubscription(subscriptionId);
     }
 
     /**
@@ -123,9 +150,7 @@ public class DurableSubscriptionModel implements PositionAwareSubscriptionModel,
      */
     @Override
     public void cancelSubscription(String subscriptionId) {
-        if ((subscriptionModel instanceof SubscriptionModelCancelSubscription)) {
-            ((SubscriptionModelCancelSubscription) subscriptionModel).cancelSubscription(subscriptionId);
-        }
+        subscriptionModel.cancelSubscription(subscriptionId);
         storage.delete(subscriptionId);
     }
 

@@ -20,10 +20,13 @@ import io.cloudevents.CloudEvent;
 import io.cloudevents.SpecVersion;
 import io.cloudevents.core.builder.CloudEventBuilder;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
-import org.occurrent.eventstore.api.LongConditionEvaluator;
-import org.occurrent.eventstore.api.WriteCondition;
+import org.occurrent.cloudevents.OccurrentExtensionGetter;
+import org.occurrent.eventstore.api.*;
+import org.occurrent.eventstore.api.SortBy.MultipleSortStepsImpl;
+import org.occurrent.eventstore.api.SortBy.NaturalImpl;
+import org.occurrent.eventstore.api.SortBy.SingleFieldImpl;
+import org.occurrent.eventstore.api.SortBy.SortDirection;
 import org.occurrent.eventstore.api.WriteCondition.StreamVersionWriteCondition;
-import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
 import org.occurrent.eventstore.api.blocking.EventStore;
 import org.occurrent.eventstore.api.blocking.EventStoreOperations;
 import org.occurrent.eventstore.api.blocking.EventStoreQueries;
@@ -34,8 +37,7 @@ import org.occurrent.functionalsupport.internal.FunctionalSupport.Pair;
 import java.net.URI;
 import java.util.*;
 import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -43,10 +45,16 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
+import static io.cloudevents.core.v1.CloudEventV1.*;
 import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
+import static java.util.Spliterators.spliteratorUnknownSize;
+import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_ID;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_VERSION;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.ASCENDING;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.DESCENDING;
 import static org.occurrent.functionalsupport.internal.FunctionalSupport.not;
 import static org.occurrent.functionalsupport.internal.FunctionalSupport.zip;
 import static org.occurrent.inmemory.filtermatching.FilterMatcher.matchesFilter;
@@ -57,7 +65,8 @@ import static org.occurrent.inmemory.filtermatching.FilterMatcher.matchesFilter;
  */
 public class InMemoryEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
-    private final ConcurrentMap<String, List<CloudEvent>> state = new ConcurrentHashMap<>();
+    // We cannot use ConcurrentMap since it doesn't maintain insertion order
+    private final Map<String, List<CloudEvent>> state = Collections.synchronizedMap(new LinkedHashMap<>());
 
     private final Consumer<Stream<CloudEvent>> listener;
 
@@ -97,13 +106,15 @@ public class InMemoryEventStore implements EventStore, EventStoreOperations, Eve
     }
 
     @Override
-    public void write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
+    public WriteResult write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
         requireTrue(writeCondition != null, WriteCondition.class.getSimpleName() + " cannot be null");
         Stream<CloudEvent> cloudEventStream = events.peek(e -> requireTrue(e.getSpecVersion() == SpecVersion.V1, "Spec version needs to be " + SpecVersion.V1));
 
         final AtomicReference<List<CloudEvent>> newCloudEvents = new AtomicReference<>();
+        final AtomicLong currentStreamVersionContainer = new AtomicLong();
         state.compute(streamId, (__, currentEvents) -> {
             long currentStreamVersion = calculateStreamVersion(currentEvents);
+            currentStreamVersionContainer.set(currentStreamVersion);
 
             if (currentEvents == null && isConditionFulfilledBy(writeCondition, 0)) {
                 List<CloudEvent> cloudEvents = applyOccurrentCloudEventExtension(cloudEventStream, streamId, 0);
@@ -120,21 +131,29 @@ public class InMemoryEventStore implements EventStore, EventStoreOperations, Eve
             }
         });
 
+        final WriteResult writeResult;
         List<CloudEvent> addedEvents = newCloudEvents.get();
         if (addedEvents != null && !addedEvents.isEmpty()) {
             listener.accept(addedEvents.stream());
+            CloudEvent cloudEvent = addedEvents.get(addedEvents.size() - 1);
+            long streamVersion = OccurrentExtensionGetter.getStreamVersion(cloudEvent);
+            writeResult = new WriteResult(streamId, streamVersion);
+        } else {
+            writeResult = new WriteResult(streamId, currentStreamVersionContainer.get());
         }
+
+        return writeResult;
     }
 
     private static List<CloudEvent> applyOccurrentCloudEventExtension(Stream<CloudEvent> events, String streamId, long streamVersion) {
         return zip(LongStream.iterate(streamVersion + 1, i -> i + 1).boxed(), events, Pair::new)
-                .map(pair -> modifyCloudEvent(e -> e.withExtension(new OccurrentCloudEventExtension(streamId, streamVersion + pair.t1))).apply(pair.t2))
+                .map(pair -> modifyCloudEvent(e -> e.withExtension(new OccurrentCloudEventExtension(streamId, pair.t1))).apply(pair.t2))
                 .collect(Collectors.toList());
     }
 
     @Override
-    public void write(String streamId, Stream<CloudEvent> events) {
-        write(streamId, WriteCondition.anyStreamVersion(), events);
+    public WriteResult write(String streamId, Stream<CloudEvent> events) {
+        return write(streamId, WriteCondition.anyStreamVersion(), events);
     }
 
     @Override
@@ -208,26 +227,55 @@ public class InMemoryEventStore implements EventStore, EventStoreOperations, Eve
 
     @Override
     public Stream<CloudEvent> query(Filter filter, int skip, int limit, SortBy sortBy) {
-        Stream<CloudEvent> stream = state.values().stream().flatMap(List::stream).filter(cloudEvent -> matchesFilter(cloudEvent, filter));
-        final Stream<CloudEvent> sorted;
-        switch (sortBy) {
-            case NATURAL_ASC:
-            case TIME_ASC:
-                sorted = stream.sorted(comparing(cloudEvent -> requireNonNull(cloudEvent.getTime())));
-                break;
-            case NATURAL_DESC:
-            case TIME_DESC:
-                sorted = stream.sorted(comparing((CloudEvent cloudEvent) -> requireNonNull(cloudEvent.getTime())).reversed());
-                break;
-            default:
-                throw new IllegalStateException("Unexpected value: " + sortBy);
+        Objects.requireNonNull(filter, Filter.class.getSimpleName() + " cannot be null");
+        Objects.requireNonNull(sortBy, SortBy.class.getSimpleName() + " cannot be null");
+
+        Stream<CloudEvent> stream;
+        synchronized (state) {
+            stream = state.values().stream().flatMap(List::stream).filter(cloudEvent -> matchesFilter(cloudEvent, filter));
         }
-        return sorted.skip(skip).limit(limit);
+
+        final Stream<CloudEvent> streamToSort;
+        final Map<CloudEvent, Integer> cloudEventPositionCache;
+        if (sortBy instanceof NaturalImpl) {
+            SortDirection order = ((NaturalImpl) sortBy).direction;
+            if (order == ASCENDING) {
+                return stream.skip(skip).limit(limit);
+            } else {
+                Iterator<CloudEvent> cloudEventIterator = stream.collect(Collectors.toCollection(LinkedList::new)).descendingIterator();
+                return StreamSupport.stream(spliteratorUnknownSize(cloudEventIterator, Spliterator.ORDERED), false).skip(skip).limit(limit);
+            }
+        } else if (isMultipleSortStepsContainingNaturalOrder(sortBy)) {
+            cloudEventPositionCache = stream.collect(LinkedHashMap::new, (cache, event) -> cache.put(event, cache.size()), LinkedHashMap::putAll);
+            streamToSort = cloudEventPositionCache.keySet().stream();
+        } else {
+            streamToSort = stream;
+            cloudEventPositionCache = Collections.emptyMap();
+        }
+
+        Comparator<CloudEvent> comparator = toComparator(cloudEventPositionCache, sortBy);
+        final Stream<CloudEvent> streamToUse;
+        if (comparator == null) {
+            streamToUse = streamToSort;
+        } else {
+            streamToUse = streamToSort.sorted(comparator);
+        }
+
+        return streamToUse.skip(skip).limit(limit);
+    }
+
+    private static boolean isMultipleSortStepsContainingNaturalOrder(SortBy sortBy) {
+        if (sortBy instanceof MultipleSortStepsImpl) {
+            return ((MultipleSortStepsImpl) sortBy).steps.stream().anyMatch(NaturalImpl.class::isInstance);
+        }
+        return false;
     }
 
     @Override
     public long count(Filter filter) {
-        return state.values().stream().mapToLong(cloudEvents -> cloudEvents.stream().filter(cloudEvent -> matchesFilter(cloudEvent, filter)).count()).reduce(0, Long::sum);
+        synchronized (state) {
+            return state.values().stream().mapToLong(cloudEvents -> cloudEvents.stream().filter(cloudEvent -> matchesFilter(cloudEvent, filter)).count()).reduce(0, Long::sum);
+        }
     }
 
     @Override
@@ -315,5 +363,73 @@ public class InMemoryEventStore implements EventStore, EventStoreOperations, Eve
             return 0;
         }
         return (long) events.get(events.size() - 1).getExtension(STREAM_VERSION);
+    }
+
+    private static Comparator<CloudEvent> toComparator(Map<CloudEvent, Integer> cloudEventPositionCache, SortBy sortBy) {
+        final Comparator<CloudEvent> comparator;
+        if (sortBy instanceof NaturalImpl) {
+            Comparator<CloudEvent> temp = Comparator.comparingInt(cloudEventPositionCache::get);
+            if (((NaturalImpl) sortBy).direction == DESCENDING) {
+                comparator = temp.reversed();
+            } else {
+                comparator = temp;
+            }
+        } else if (sortBy instanceof SingleFieldImpl) {
+            comparator = toComparator((SingleFieldImpl) sortBy);
+        } else if (sortBy instanceof MultipleSortStepsImpl) {
+            comparator = ((MultipleSortStepsImpl) sortBy).steps.stream()
+                    .map(step -> toComparator(cloudEventPositionCache, step))
+                    .filter(Objects::nonNull)
+                    .reduce(Comparator::thenComparing)
+                    .orElse(null);
+        } else {
+            throw new IllegalStateException("Internal error: Unrecognized \"sort by\" " + sortBy);
+        }
+        return comparator;
+    }
+
+    private static Comparator<CloudEvent> toComparator(SingleFieldImpl singleField) {
+        String fieldName = singleField.fieldName;
+        final Comparator<CloudEvent> comparator;
+        switch (fieldName) {
+            case TIME:
+                comparator = comparing(CloudEvent::getTime);
+                break;
+            case STREAM_VERSION:
+                comparator = comparing(OccurrentExtensionGetter::getStreamVersion);
+                break;
+            case STREAM_ID:
+                comparator = comparing(OccurrentExtensionGetter::getStreamId);
+                break;
+            case ID:
+                comparator = comparing(CloudEvent::getId);
+                break;
+            case SOURCE:
+                comparator = comparing(CloudEvent::getSource);
+                break;
+            case SUBJECT:
+                comparator = comparing(CloudEvent::getSubject);
+                break;
+            case TYPE:
+                comparator = comparing(CloudEvent::getType);
+                break;
+            case SPECVERSION:
+                comparator = comparing(CloudEvent::getSpecVersion);
+                break;
+            case DATACONTENTTYPE:
+                comparator = comparing(CloudEvent::getDataContentType);
+                break;
+            case DATASCHEMA:
+                comparator = comparing(CloudEvent::getDataSchema);
+                break;
+            default:
+                throw new IllegalStateException("Unexpected value: " + fieldName);
+        }
+
+        if (singleField.direction == ASCENDING) {
+            return comparator;
+        } else {
+            return comparator.reversed();
+        }
     }
 }

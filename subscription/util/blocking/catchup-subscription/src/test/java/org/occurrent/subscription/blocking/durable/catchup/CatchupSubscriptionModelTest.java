@@ -33,6 +33,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.occurrent.domain.DomainEvent;
 import org.occurrent.domain.NameDefined;
 import org.occurrent.domain.NameWasChanged;
+import org.occurrent.eventstore.api.SortBy;
 import org.occurrent.eventstore.mongodb.nativedriver.EventStoreConfig;
 import org.occurrent.eventstore.mongodb.nativedriver.MongoEventStore;
 import org.occurrent.mongodb.timerepresentation.TimeRepresentation;
@@ -40,6 +41,7 @@ import org.occurrent.retry.RetryStrategy;
 import org.occurrent.subscription.StartAt;
 import org.occurrent.subscription.SubscriptionPosition;
 import org.occurrent.subscription.blocking.durable.DurableSubscriptionModel;
+import org.occurrent.subscription.internal.ExecutorShutdown;
 import org.occurrent.subscription.mongodb.nativedriver.blocking.NativeMongoSubscriptionModel;
 import org.occurrent.subscription.mongodb.nativedriver.blocking.NativeMongoSubscriptionPositionStorage;
 import org.occurrent.testsupport.mongodb.FlushMongoDBExtension;
@@ -51,10 +53,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -62,10 +61,10 @@ import java.util.stream.Stream;
 import static java.time.ZoneOffset.UTC;
 import static java.time.temporal.ChronoUnit.MILLIS;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.awaitility.Durations.FIVE_SECONDS;
+import static org.occurrent.filter.Filter.TIME;
 import static org.occurrent.filter.Filter.type;
 import static org.occurrent.functional.CheckedFunction.unchecked;
 import static org.occurrent.subscription.OccurrentSubscriptionFilter.filter;
@@ -77,7 +76,7 @@ import static org.occurrent.time.TimeConversion.toLocalDateTime;
 public class CatchupSubscriptionModelTest {
 
     @Container
-    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8");
+    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8").withReuse(true);
 
     @RegisterExtension
     FlushMongoDBExtension flushMongoDBExtension = new FlushMongoDBExtension(new ConnectionString(mongoDBContainer.getReplicaSetUrl()));
@@ -107,14 +106,9 @@ public class CatchupSubscriptionModelTest {
 
 
     @AfterEach
-    void shutdown() throws InterruptedException {
+    void shutdown() {
         subscription.shutdown();
-        if (!subscriptionExecutor.isShutdown() && !subscriptionExecutor.isTerminated()) {
-            subscriptionExecutor.shutdown();
-            if (!subscriptionExecutor.awaitTermination(5, SECONDS)) {
-                subscriptionExecutor.shutdownNow();
-            }
-        }
+        ExecutorShutdown.shutdownSafely(subscriptionExecutor, 5, TimeUnit.SECONDS);
         mongoClient.close();
     }
 
@@ -161,6 +155,34 @@ public class CatchupSubscriptionModelTest {
             assertThat(state).hasSize(2);
             assertThat(state).extracting(CloudEvent::getType).containsOnly(NameDefined.class.getName());
         });
+    }
+
+    @Test
+    void catchup_subscription_reads_historic_events_with_filter_using_custom_sort_by_during_catchup_phase() {
+        // Given
+        LocalDateTime now = LocalDateTime.now();
+        String eventId1 = UUID.randomUUID().toString();
+        String eventId2 = UUID.randomUUID().toString();
+        String eventId3 = UUID.randomUUID().toString();
+        NameDefined nameDefined1 = new NameDefined(eventId1, now, "name1");
+        NameDefined nameDefined2 = new NameDefined(eventId2, now.plusSeconds(2), "name2");
+        NameWasChanged nameWasChanged1 = new NameWasChanged(eventId3, now.plusSeconds(10), "name3");
+
+        mongoEventStore.write("1", 0, serialize(nameDefined1));
+        mongoEventStore.write("2", 0, serialize(nameDefined2));
+        mongoEventStore.write("1", 1, serialize(nameWasChanged1));
+
+        CopyOnWriteArrayList<CloudEvent> state = new CopyOnWriteArrayList<>();
+
+        CatchupSubscriptionModelConfig cfg = new CatchupSubscriptionModelConfig(100, useSubscriptionPositionStorage(storage).andPersistSubscriptionPositionDuringCatchupPhaseForEveryNEvents(1))
+                .catchupPhaseSortBy(SortBy.descending(TIME));
+        subscription = newCatchupSubscription(database, eventCollection, TimeRepresentation.DATE, cfg);
+
+        // When
+        subscription.subscribe(UUID.randomUUID().toString(), StartAt.subscriptionPosition(TimeBasedSubscriptionPosition.beginningOfTime()), state::add).waitUntilStarted();
+
+        // Then
+        await().atMost(FIVE_SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).extracting(CloudEvent::getId).containsExactly(eventId3, eventId2, eventId1));
     }
 
     @Test

@@ -33,14 +33,12 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledForJreRange;
 import org.junit.jupiter.api.condition.EnabledOnJre;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.condition.Condition;
 import org.occurrent.domain.*;
-import org.occurrent.eventstore.api.DuplicateCloudEventException;
-import org.occurrent.eventstore.api.WriteCondition;
-import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
-import org.occurrent.eventstore.api.reactor.EventStoreQueries;
+import org.occurrent.eventstore.api.*;
 import org.occurrent.eventstore.api.reactor.EventStream;
 import org.occurrent.filter.Filter;
 import org.occurrent.functional.CheckedFunction;
@@ -65,6 +63,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -73,6 +72,7 @@ import java.util.stream.Stream;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.ZoneOffset.UTC;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.hamcrest.Matchers.not;
@@ -80,7 +80,11 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.condition.JRE.JAVA_11;
 import static org.junit.jupiter.api.condition.JRE.JAVA_8;
+import static org.junit.jupiter.api.condition.OS.MAC;
+import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_VERSION;
 import static org.occurrent.condition.Condition.*;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.ASCENDING;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.DESCENDING;
 import static org.occurrent.filter.Filter.*;
 import static org.occurrent.mongodb.timerepresentation.TimeRepresentation.RFC_3339_STRING;
 import static org.occurrent.time.TimeConversion.offsetDateTimeFrom;
@@ -99,6 +103,7 @@ public class ReactorMongoEventStoreTest {
         mongoDBContainer = new MongoDBContainer("mongo:4.2.8");
         List<String> ports = new ArrayList<>();
         ports.add("27017:27017");
+        mongoDBContainer.withReuse(true);
         mongoDBContainer.setPortBindings(ports);
     }
 
@@ -185,7 +190,7 @@ public class ReactorMongoEventStoreTest {
     }
 
     @Test
-    void can_read_events_with_skip_and_limit_using_mongo_event_store() {
+    void can_read_events_with_skip_and_limit_using_reactor_mongo_event_() {
         LocalDateTime now = LocalDateTime.now();
         NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
         NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name2");
@@ -336,6 +341,77 @@ public class ReactorMongoEventStoreTest {
                 () -> assertThat(versionAndEvents.events).hasSize(2),
                 () -> assertThat(versionAndEvents.events).containsExactly(nameDefined, nameWasChanged1)
         );
+    }
+
+    @Nested
+    @DisplayName("write result")
+    class WriteResultTest {
+
+        @Test
+        void reactor_mongo_event_returns_the_new_stream_version_when_at_least_one_event_is_written_to_an_empty_stream() {
+            // Given
+            LocalDateTime now = LocalDateTime.now();
+
+            // When
+            DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+            DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+            WriteResult writeResult = persist("name", Flux.just(event1, event2)).block();
+
+            // Then
+            assertAll(
+                    () -> assertThat(writeResult.getStreamId()).isEqualTo("name"),
+                    () -> assertThat(writeResult.getStreamVersion()).isEqualTo(2L)
+            );
+        }
+
+        @Test
+        void reactor_mongo_event_returns_the_new_stream_version_when_at_least_one_event_is_written_to_an_existing_stream() {
+            // Given
+            LocalDateTime now = LocalDateTime.now();
+
+            // When
+            DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+            DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+            DomainEvent event3 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe2");
+            persist("name", Flux.just(event1)).block();
+            WriteResult writeResult = persist("name", Flux.just(event2, event3)).block();
+
+            // Then
+            assertAll(
+                    () -> assertThat(writeResult.getStreamId()).isEqualTo("name"),
+                    () -> assertThat(writeResult.getStreamVersion()).isEqualTo(3L)
+            );
+        }
+
+        @Test
+        void reactor_mongo_event_returns_0_as_version_when_no_events_are_written_to_an_empty_stream() {
+            // When
+            WriteResult writeResult = persist("name", Flux.empty()).block();
+
+            // Then
+            assertAll(
+                    () -> assertThat(writeResult.getStreamId()).isEqualTo("name"),
+                    () -> assertThat(writeResult.getStreamVersion()).isEqualTo(0L)
+            );
+        }
+
+        @Test
+        void reactor_mongo_event_returns_the_previous_stream_version_when_no_events_are_written_to_an_existing_stream() {
+            // Given
+            LocalDateTime now = LocalDateTime.now();
+
+            // When
+            DomainEvent event1 = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+            DomainEvent event2 = new NameWasChanged(UUID.randomUUID().toString(), now, "Jan Doe");
+            persist("name", Flux.just(event1, event2)).block();
+            WriteResult writeResult = persist("name", Flux.empty()).block();
+
+            // Then
+            assertAll(
+                    () -> assertThat(writeResult.getStreamId()).isEqualTo("name"),
+                    () -> assertThat(writeResult.getStreamVersion()).isEqualTo(2L)
+            );
+        }
     }
 
     @SuppressWarnings("ConstantConditions")
@@ -651,6 +727,36 @@ public class ReactorMongoEventStoreTest {
     class ConditionallyWriteToSpringMongoEventStore {
 
         LocalDateTime now = LocalDateTime.now();
+
+        @Nested
+        @DisplayName("parallel writes")
+        class ParallelWritesToEventStoreReturns {
+
+            @EnabledOnOs(MAC)
+            @RepeatedIfExceptionsTest(repeats = 5, suspend = 500)
+            void parallel_writes_to_event_store_throws_WriteConditionNotFulfilledException() {
+                // Given
+                CyclicBarrier cyclicBarrier = new CyclicBarrier(2);
+                WriteCondition writeCondition = WriteCondition.streamVersionEq(0);
+                AtomicReference<Throwable> exception = new AtomicReference<>();
+
+                // When
+                new Thread(() -> {
+                    NameDefined event = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+                    await(cyclicBarrier);
+                    exception.set(catchThrowable(() -> persist("name", writeCondition, event).block()));
+                }).start();
+
+                new Thread(() -> {
+                    NameDefined event = new NameDefined(UUID.randomUUID().toString(), now, "John Doe");
+                    await(cyclicBarrier);
+                    exception.set(catchThrowable(() -> persist("name", writeCondition, event).block()));
+                }).start();
+
+                // Then
+                Awaitility.await().atMost(4, SECONDS).untilAsserted(() -> assertThat(exception).hasValue(new WriteConditionNotFulfilledException("name", 1, writeCondition, "WriteCondition was not fulfilled. Expected version to be equal to 0 but was 1.")));
+            }
+        }
 
         @Nested
         @DisplayName("eq")
@@ -1303,7 +1409,7 @@ public class ReactorMongoEventStoreTest {
                 persist("name1", nameDefined).block();
 
                 // Then
-                Flux<CloudEvent> events = eventStore.all(EventStoreQueries.SortBy.NATURAL_ASC);
+                Flux<CloudEvent> events = eventStore.all(SortBy.natural(ASCENDING));
                 assertThat(deserialize(events)).containsExactly(nameWasChanged1, nameWasChanged2, nameDefined);
             }
 
@@ -1321,7 +1427,7 @@ public class ReactorMongoEventStoreTest {
                 persist("name1", nameDefined).block();
 
                 // Then
-                Flux<CloudEvent> events = eventStore.all(EventStoreQueries.SortBy.NATURAL_DESC);
+                Flux<CloudEvent> events = eventStore.all(SortBy.natural(DESCENDING));
                 assertThat(deserialize(events)).containsExactly(nameDefined, nameWasChanged2, nameWasChanged1);
             }
 
@@ -1339,7 +1445,7 @@ public class ReactorMongoEventStoreTest {
                 persist("name1", nameDefined).block();
 
                 // Then
-                Flux<CloudEvent> events = eventStore.all(EventStoreQueries.SortBy.TIME_ASC);
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(ASCENDING));
                 assertThat(deserialize(events)).containsExactly(nameWasChanged1, nameDefined, nameWasChanged2);
             }
 
@@ -1357,8 +1463,79 @@ public class ReactorMongoEventStoreTest {
                 persist("name1", nameDefined).block();
 
                 // Then
-                Flux<CloudEvent> events = eventStore.all(EventStoreQueries.SortBy.TIME_DESC);
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(DESCENDING));
                 assertThat(deserialize(events)).containsExactly(nameDefined, nameWasChanged2, nameWasChanged1);
+            }
+
+            @Test
+            void sort_by_time_desc_and_natural_descending() {
+                LocalDateTime now = LocalDateTime.now();
+                NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+                NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now, "name2");
+                NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name3");
+
+                // When
+                persist("name1", nameDefined).block();
+                persist("name3", nameWasChanged1).block();
+                persist("name2", nameWasChanged2).block();
+
+                // Then
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(DESCENDING).thenNatural(DESCENDING));
+                assertThat(deserialize(events)).containsExactly(nameWasChanged2, nameWasChanged1, nameDefined);
+            }
+
+            @Test
+            void sort_by_time_desc_and_natural_ascending() {
+                // Given
+                LocalDateTime now = LocalDateTime.now();
+                NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+                NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now, "name2");
+                NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name3");
+
+                // When
+                persist("name", nameDefined).block();
+                persist("name", nameWasChanged1).block();
+                persist("name", nameWasChanged2).block();
+
+                // Then
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(DESCENDING).thenNatural(ASCENDING));
+                // Natural ignores other sort parameters!!
+                assertThat(deserialize(events)).containsExactly(nameDefined, nameWasChanged1, nameWasChanged2);
+            }
+
+            @Test
+            void sort_by_time_desc_and_other_field_descending() {
+                LocalDateTime now = LocalDateTime.now();
+                NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+                NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now, "name2");
+                NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name3");
+
+                // When
+                persist("name", nameDefined).block();
+                persist("name", nameWasChanged1).block();
+                persist("name", nameWasChanged2).block();
+
+                // Then
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(DESCENDING).then(STREAM_VERSION, DESCENDING));
+                assertThat(deserialize(events)).containsExactly(nameWasChanged2, nameWasChanged1, nameDefined);
+            }
+
+            @Test
+            void sort_by_time_desc_and_other_field_ascending() {
+                // Given
+                LocalDateTime now = LocalDateTime.now();
+                NameDefined nameDefined = new NameDefined(UUID.randomUUID().toString(), now, "name");
+                NameWasChanged nameWasChanged1 = new NameWasChanged(UUID.randomUUID().toString(), now, "name2");
+                NameWasChanged nameWasChanged2 = new NameWasChanged(UUID.randomUUID().toString(), now.plusHours(1), "name3");
+
+                // When
+                persist("name1", nameDefined).block();
+                persist("name3", nameWasChanged1).block();
+                persist("name2", nameWasChanged2).block();
+
+                // Then
+                Flux<CloudEvent> events = eventStore.all(SortBy.time(DESCENDING).then(STREAM_VERSION, ASCENDING));
+                assertThat(deserialize(events)).containsExactly(nameWasChanged2, nameDefined, nameWasChanged1);
             }
         }
 
@@ -1585,34 +1762,33 @@ public class ReactorMongoEventStoreTest {
         return eventStreamMono.map(EventStream::id).block();
     }
 
-
-    private Mono<Void> persist(String eventStreamId, CloudEvent event) {
+    private Mono<WriteResult> persist(String eventStreamId, CloudEvent event) {
         return eventStore.write(eventStreamId, Flux.just(event));
     }
 
-    private Mono<Void> persist(String eventStreamId, DomainEvent event) {
+    private Mono<WriteResult> persist(String eventStreamId, DomainEvent event) {
         return eventStore.write(eventStreamId, Flux.just(convertDomainEventCloudEvent(event)));
     }
 
-    private Mono<Void> persist(String eventStreamId, Flux<DomainEvent> events) {
+    private Mono<WriteResult> persist(String eventStreamId, Flux<DomainEvent> events) {
         return eventStore.write(eventStreamId, events.map(this::convertDomainEventCloudEvent));
     }
 
-    private Mono<Void> persist(String eventStreamId, List<DomainEvent> events) {
+    private Mono<WriteResult> persist(String eventStreamId, List<DomainEvent> events) {
         return persist(eventStreamId, Flux.fromIterable(events));
     }
 
-    private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, DomainEvent event) {
+    private Mono<WriteResult> persist(String eventStreamId, WriteCondition writeCondition, DomainEvent event) {
         List<DomainEvent> events = new ArrayList<>();
         events.add(event);
         return persist(eventStreamId, writeCondition, events);
     }
 
-    private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, List<DomainEvent> events) {
+    private Mono<WriteResult> persist(String eventStreamId, WriteCondition writeCondition, List<DomainEvent> events) {
         return persist(eventStreamId, writeCondition, Flux.fromIterable(events));
     }
 
-    private Mono<Void> persist(String eventStreamId, WriteCondition writeCondition, Flux<DomainEvent> events) {
+    private Mono<WriteResult> persist(String eventStreamId, WriteCondition writeCondition, Flux<DomainEvent> events) {
         return eventStore.write(eventStreamId, writeCondition, events.map(this::convertDomainEventCloudEvent));
     }
 
@@ -1639,5 +1815,12 @@ public class ReactorMongoEventStoreTest {
             throw new RuntimeException(e);
         }
     }
-}
 
+    private static void await(CyclicBarrier cyclicBarrier) {
+        try {
+            cyclicBarrier.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}

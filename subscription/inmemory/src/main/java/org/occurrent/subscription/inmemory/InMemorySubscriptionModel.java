@@ -24,7 +24,7 @@ import org.occurrent.subscription.StartAt;
 import org.occurrent.subscription.SubscriptionFilter;
 import org.occurrent.subscription.api.blocking.Subscription;
 import org.occurrent.subscription.api.blocking.SubscriptionModel;
-import org.occurrent.subscription.api.blocking.SubscriptionModelLifeCycle;
+import org.occurrent.subscription.internal.ExecutorShutdown;
 
 import javax.annotation.PreDestroy;
 import java.util.List;
@@ -37,12 +37,13 @@ import java.util.stream.Stream;
 /**
  * An in-memory subscription model
  */
-public class InMemorySubscriptionModel implements SubscriptionModel, SubscriptionModelLifeCycle, Consumer<Stream<CloudEvent>> {
+public class InMemorySubscriptionModel implements SubscriptionModel, Consumer<Stream<CloudEvent>> {
 
     private final ConcurrentMap<String, InMemorySubscription> subscriptions;
     private final ConcurrentMap<String, Boolean> pausedSubscriptions;
     private final ExecutorService cloudEventDispatcher;
     private final RetryStrategy retryStrategy;
+    private final Supplier<BlockingQueue<CloudEvent>> queueSupplier;
 
     private volatile boolean shutdown = false;
     private volatile boolean running = true;
@@ -70,20 +71,33 @@ public class InMemorySubscriptionModel implements SubscriptionModel, Subscriptio
      * @param retryStrategy        The retry strategy
      */
     public InMemorySubscriptionModel(ExecutorService cloudEventDispatcher, RetryStrategy retryStrategy) {
+        this(cloudEventDispatcher, retryStrategy, LinkedBlockingQueue::new);
+    }
+
+    /**
+     * Create an instance of {@link InMemorySubscriptionModel} with the given parameters
+     *
+     * @param cloudEventDispatcher The {@link ExecutorService} that will be used when dispatching cloud events to subscribers
+     * @param retryStrategy        The retry strategy
+     * @param queue                The blocking queue to use for this instance.
+     */
+    public InMemorySubscriptionModel(ExecutorService cloudEventDispatcher, RetryStrategy retryStrategy, Supplier<BlockingQueue<CloudEvent>> queue) {
         if (cloudEventDispatcher == null) {
             throw new IllegalArgumentException("cloudEventDispatcher cannot be null");
         } else if (retryStrategy == null) {
             throw new IllegalArgumentException(RetryStrategy.class.getSimpleName() + " cannot be null");
+        } else if (queue == null) {
+            throw new IllegalArgumentException(BlockingQueue.class.getSimpleName() + " cannot be null");
         }
+        this.queueSupplier = queue;
         this.cloudEventDispatcher = cloudEventDispatcher;
         this.retryStrategy = retryStrategy;
         this.subscriptions = new ConcurrentHashMap<>();
         this.pausedSubscriptions = new ConcurrentHashMap<>();
     }
 
-
     @Override
-    public synchronized Subscription subscribe(String subscriptionId, SubscriptionFilter filter, Supplier<StartAt> startAtSupplier, Consumer<CloudEvent> action) {
+    public synchronized Subscription subscribe(String subscriptionId, SubscriptionFilter filter, StartAt startAt, Consumer<CloudEvent> action) {
         if (shutdown) {
             throw new IllegalStateException("Cannot subscribe when shutdown");
         } else if (subscriptionId == null) {
@@ -92,18 +106,18 @@ public class InMemorySubscriptionModel implements SubscriptionModel, Subscriptio
             throw new IllegalArgumentException("action cannot be null");
         } else if (subscriptions.containsKey(subscriptionId) || pausedSubscriptions.containsKey(subscriptionId)) {
             throw new IllegalArgumentException("Subscription " + subscriptionId + " is already defined.");
+        } else if (startAt == null) {
+            throw new IllegalArgumentException(StartAt.class.getSimpleName() + " cannot be null");
         }
 
-        if (startAtSupplier != null) {
-            StartAt startAt = startAtSupplier.get();
-            if (!startAt.isNow()) {
-                throw new IllegalArgumentException(InMemorySubscriptionModel.class.getSimpleName() + " only supports starting from 'now' (StartAt.now())");
-            }
+        StartAt startAtToUse = startAt.get();
+        if (!startAtToUse.isNow() && !startAtToUse.isDefault()) {
+            throw new IllegalArgumentException(InMemorySubscriptionModel.class.getSimpleName() + " only supports starting from 'now' and 'default' (StartAt.now() or StartAt.subscriptionModelDefault())");
         }
 
         final Filter f = getFilter(filter);
 
-        InMemorySubscription subscription = new InMemorySubscription(subscriptionId, new LinkedBlockingQueue<>(), action, f, retryStrategy);
+        InMemorySubscription subscription = new InMemorySubscription(subscriptionId, queueSupplier.get(), action, f, retryStrategy);
         subscriptions.put(subscriptionId, subscription);
 
         if (!running) {
@@ -142,18 +156,9 @@ public class InMemorySubscriptionModel implements SubscriptionModel, Subscriptio
             subscriptions.values().forEach(InMemorySubscription::shutdown);
             subscriptions.clear();
         }
+
         pausedSubscriptions.clear();
-        if (!cloudEventDispatcher.isShutdown() && !cloudEventDispatcher.isTerminated()) {
-            cloudEventDispatcher.shutdown();
-            try {
-                boolean terminated = cloudEventDispatcher.awaitTermination(5, TimeUnit.SECONDS);
-                if (!terminated) {
-                    cloudEventDispatcher.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                cloudEventDispatcher.shutdownNow();
-            }
-        }
+        ExecutorShutdown.shutdownSafely(cloudEventDispatcher, 5, TimeUnit.SECONDS);
     }
 
     private static Filter getFilter(SubscriptionFilter filter) {

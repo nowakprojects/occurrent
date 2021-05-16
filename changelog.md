@@ -1,5 +1,115 @@
 ## Changelog next version
 
+* Improved error message and version for write condition not fulfilled that may happened when parallel writers write to the same stream at the same time.
+* Upgraded to cloud events java sdk to version 2.1.0
+
+## Changelog 0.10.0 (2021-04-16)
+                   
+* The event store API's now returns an instance of `org.occurrent.eventstore.api.WriteResult` when writing events to the event store (previously `void` was returned). 
+  The `WriteResult` instance contains the stream id and the new stream version of the stream. The reason for this change is to make it easier to implement use cases such
+  as "read your own writes".
+* The blocking ApplicationService `org.occurrent.application.service.blocking.ApplicationService` now returns `WriteResult` instead of `void`.
+* Fixed bug in `InMemoryEventStore` that accidentally could skip version numbers when new events were inserted into the database.
+* Improved detection of duplicate cloud event's in all MongoDB event stores
+* Fixed a bug where `WriteConditionNotFulfilledException` was not thrown when a streams was updated by several threads in parallel (fixed for all mongodb event store implementations)
+* Upgraded Spring Boot from 2.4.2 to 2.4.4
+* Upgraded reactor from 3.4.2 to 3.4.4
+* Upgraded spring-data-mongodb from 3.1.1 to 3.1.7
+* Upgraded lettuce-core from 6.0.1 to 6.1.0
+* Upgraded mongo java client from 4.1.1 to 4.2.2
+* Upgraded spring-aspects from 5.2.9.RELEASE to 5.3.5
+* Upgraded spring-retry from 1.3.0 to 1.3.1
+* Upgraded kotlin from 1.4.31 to 1.4.32
+* Upgraded kotlinx-collections-immutable-jvm from 0.3.2 to 0.3.4
+
+## Changelog 0.9.0 (2021-03-19)
+                                                                                                                                                                                        
+* Fixed a bug in `InMemorySubscription` that accidentally pushed `null` values to subscriptions every 500 millis unless an actual event was received.
+* Renamed `org.occurrent.subscription.mongodb.spring.blocking.SpringSubscriptionModelConfig` to `org.occurrent.subscription.mongodb.spring.blocking.SpringMongoSubscriptionModelConfig`.
+* Upgraded to Kotlin 1.4.31
+* All blocking subscriptions now implements the life cycle methods defined in the `org.occurrent.subscription.api.blocking.SubscriptionModelLifeCycle` interface. A new interface, `org.occurrent.subscription.api.blocking.Subscribable`
+  has been defined, that contains all "subscribe" methods. You can use this interface in your application if all you want to do is start subscriptions.
+* Introduced a new default "StartAt" implementation called "default" (`StartAt.subscriptionModelDefault()`). This is different to `StartAt.now()` in that it will allow the subscription model 
+  to choose where to start automatically if you don't want to start at an earlier position.
+* Removed the ability to pass a supplier returning `StartAt` to the subscribe methods in `org.occurrent.subscription.api.blocking.Subscribable` interface. Instead, use `StartAt.dynamic(supplier)` to achieve the same result.
+* Upgraded to CloudEvents Java SDK 2.0.0
+* Waiting for internal message listener to be shutdown when stopping `SpringMongoSubscriptionModel`.
+* Using a `org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor` as executor in `SpringMongoSubscriptionModel` instead of the default `org.springframework.core.task.SimpleAsyncTaskExecutor`. 
+  The reason for this is that the `DefaultMessageListenerContainer` used internally in `SpringMongoSubscriptionModel` will wait for all threads in the `ThreadPoolTaskExecutor` to stop when stopping the
+  `SpringMongoSubscriptionModel` instance. Otherwise, a race conditions can occur when stopping and then immediately starting a `SpringMongoSubscriptionModel`.
+* Introducing competing consumer support! A competing consumer subscription model wraps another subscription model to allow several subscribers to subscribe to the same subscription. One of the subscribes will get a lock of the subscription
+  and receive events from it. If a subscriber looses its lock, another subscriber will take over automatically. To achieve distributed locking, the subscription model uses a `org.occurrent.subscription.api.blocking.CompetingConsumerStrategy` to
+  support different algorithms. You can write custom algorithms by implementing this interface yourself. Here's an example of how to use the `CompetingConsumerSubscriptionModel`. First add the `org.occurrent:competing-consumer-subscription` module to 
+  classpath. This example uses the `NativeMongoLeaseCompetingConsumerStrategy` from module `org.occurrent:subscription-mongodb-native-blocking-competing-consumer-strategy`. It also wraps the [DurableSubscriptionModel](https://occurrent.org/documentation#durable-subscriptions-blocking) 
+  which in turn wraps the [Native MongoDB](https://occurrent.org/documentation#blocking-subscription-using-the-native-java-mongodb-driver) subscription model.
+  
+  ```java
+  MongoDatabase mongoDatabase = mongoClient.getDatabase("some-database");
+  SubscriptionPositionStorage positionStorage = NativeMongoSubscriptionPositionStorage(mongoDatabase, "position-storage");
+  SubscriptionModel wrappedSubscriptionModel = new DurableSubscriptionModel(new NativeMongoSubscriptionModel(mongoDatabase, "events", TimeRepresentation.DATE), positionStorage);
+     // Create the CompetingConsumerSubscriptionModel
+  NativeMongoLeaseCompetingConsumerStrategy competingConsumerStrategy = NativeMongoLeaseCompetingConsumerStrategy.withDefaults(mongoDatabase);
+  CompetingConsumerSubscriptionModel competingConsumerSubscriptionModel = new CompetingConsumerSubscriptionModel(wrappedSubscriptionModel, competingConsumerStrategy);
+     // Now subscribe!
+  competingConsumerSubscriptionModel.subscribe("subscriptionId", type("SomeEvent"));
+  ```
+  
+  If the above code is executed on multiple nodes/processes, then only *one* subscriber will receive events.
+
+## Changelog 0.8.0 (2021-02-20)
+
+* Only log with "warn" when subscription is restarted due to "ChangeStreamHistoryLost".
+* `InMemoryEventStore` now sorts queries by insertion order by default (before "time" was used)
+* Added a new default compound index to MongoDB event stores, `{ streamid : 1, streamversion : 1}`. The reason for this is to get the events back in order when reading a stream from the event store _and_ 
+  to make this efficient. Previous `$natural` order was used but this would skip the index, making reads slower if you have lots of data.
+* Removed the index, `{ streamid : 1, streamversion : -1 }`, from all MongoDB EventStore's. It's no longer needed now that we have `{ streamid : 1, streamversion : 1}`.
+* All MongoDB EventStore's now loads the events for a stream by leveraging the new `{ streamid : 1, streamversion : 1}` index.
+* `CatchupSubscriptionModel` now sorts by time and then by stream version to allow for a consistent read order (see [MongoDB documentation](https://docs.mongodb.com/manual/reference/method/cursor.sort/#sort-consistency)).
+  Note that the above is only true _if_ you supply a `TimeBasedSubscriptionPosition` that is _not_ equal to ``TimeBasedSubscriptionPosition.beginningOfTime()` (which is default if no filter is supplied).
+* Major change in how you can sort the result from queries. Before you only had four options, "natural" (ascending/descending) and "time" (ascending/descending), now you can specify any support CloudEvent 
+  field. This means that e.g. `SortBy.TIME_ASC` has been removed. It has been replaced with the `SortBy` API (`org.occurrent.eventstore.api.SortBy`), that allows you to do e.g.
+  
+  ```java
+  SortBy.time(ASCENDING)
+  ```
+  
+  Sorting can now be composed, e.g.
+
+  ```java
+  SortBy.time(ASCENDING).thenNatural(DESCENDING)  
+  ```
+  
+  This has been implemented for all event stores.
+* It's now possible to change how `CatchupSubscriptionModel` sorts events read from the event store during catch-up phase. For example:
+  
+  ```java
+  var subscriptionModel = ...
+  var eventStore = ..
+  var cfg = new CatchupSubscriptionModelConfig(100).catchupPhaseSortBy(SortBy.descending(TIME));
+  var catchupSubscriptionModel = CatchupSubscriptionModel(subscriptionModel, eventStore, cfg);  
+  ```
+
+  By default, events are sorted by time and then stream version (if two or more events have the same time).
+
+## Changelog 0.7.4 (2021-02-13)
+
+* Added better logging to `SpringMongoSubscriptionModel`, it'll now include the subscription id if an error occurs.
+* If there's not enough history available in the mongodb oplog to resume a subscription created from a `SpringMongoSubscriptionModel`, this subscription model now supports restarting the subscription from the current 
+  time automatically. This is only of concern when an application is restarted, and the subscriptions are configured to start from a position in the oplog that is no longer available. It's disabled by default since it might not 
+  be 100% safe (meaning that you can miss some events when the subscription is restarted). It's not 100% safe if you run subscriptions in a different process than the event store _and_ you have lot's of 
+  writes happening to the event store. It's safe if you run the subscription in the same process as the writes to the event store _if_ you make sure that the
+  subscription is started _before_ you accept writes to the event store on startup. To enable automatic restart, you can do like this:
+  
+  ```java
+  var subscriptionModel = new SpringMongoSubscriptionModel(mongoTemplate, SpringSubscriptionModelConfig.withConfig("events", TimeRepresentation.RFC_3339_STRING).restartSubscriptionsOnChangeStreamHistoryLost(true));
+  ```
+  
+  An alternative approach to restarting automatically is to use a catch-up subscription and restart the subscription from an earlier date.
+* Better shutdown handling of all executor services used by subscription models.
+* Don't log to error when a `SpringMongoSubscriptionModel` subscription is paused right after it was created, leading to a race condition. This is not an error. It's now logged in "debug" mode instead.
+
+## Changelog 0.7.3 (2021-02-11)
+
 * Removed the automatic creation of the "streamid" index in all MongoDB event stores. The reason is that it's not needed since there's another (compound) index (streamid+version) and 
   queries for "streamid" will be covered by that index.
 

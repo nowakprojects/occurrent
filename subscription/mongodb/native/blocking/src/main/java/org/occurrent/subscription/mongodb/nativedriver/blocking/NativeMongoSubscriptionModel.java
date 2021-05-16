@@ -37,7 +37,7 @@ import org.occurrent.subscription.*;
 import org.occurrent.subscription.api.blocking.PositionAwareSubscriptionModel;
 import org.occurrent.subscription.api.blocking.Subscription;
 import org.occurrent.subscription.api.blocking.SubscriptionModel;
-import org.occurrent.subscription.api.blocking.SubscriptionModelLifeCycle;
+import org.occurrent.subscription.internal.ExecutorShutdown;
 import org.occurrent.subscription.mongodb.MongoFilterSpecification;
 import org.occurrent.subscription.mongodb.MongoOperationTimeSubscriptionPosition;
 import org.occurrent.subscription.mongodb.MongoResumeTokenSubscriptionPosition;
@@ -52,20 +52,15 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.mongodb.client.model.Aggregates.match;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.occurrent.retry.internal.RetryExecution.executeWithRetry;
 import static org.occurrent.subscription.mongodb.internal.MongoCommons.cannotFindGlobalSubscriptionPositionErrorMessage;
 
@@ -77,7 +72,7 @@ import static org.occurrent.subscription.mongodb.internal.MongoCommons.cannotFin
  * or use the {@code DurableSubscriptionModel} utility from the {@code org.occurrent:durable-subscription}
  * module.
  */
-public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionModel, SubscriptionModelLifeCycle {
+public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionModel {
     private static final Logger log = LoggerFactory.getLogger(NativeMongoSubscriptionModel.class);
 
     private final MongoCollection<Document> eventCollection;
@@ -147,10 +142,10 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
     }
 
     @Override
-    public synchronized Subscription subscribe(String subscriptionId, SubscriptionFilter filter, Supplier<StartAt> startAtSupplier, Consumer<CloudEvent> action) {
+    public synchronized Subscription subscribe(String subscriptionId, SubscriptionFilter filter, StartAt startAt, Consumer<CloudEvent> action) {
         requireNonNull(subscriptionId, "subscriptionId cannot be null");
         requireNonNull(action, "Action cannot be null");
-        requireNonNull(startAtSupplier, "Start at cannot be null");
+        requireNonNull(startAt, StartAt.class.getSimpleName() + " cannot be null");
 
         if (runningSubscriptions.containsKey(subscriptionId) || pausedSubscriptions.containsKey(subscriptionId)) {
             throw new IllegalArgumentException("Subscription " + subscriptionId + " is already defined.");
@@ -158,7 +153,7 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
 
         CountDownLatch subscriptionStartedLatch = new CountDownLatch(1);
 
-        Runnable internalSubscription = () -> newInternalSubscription(subscriptionId, filter, startAtSupplier, action, subscriptionStartedLatch);
+        Runnable internalSubscription = () -> newInternalSubscription(subscriptionId, filter, startAt, action, subscriptionStartedLatch);
 
         if (shutdown || cloudEventDispatcher.isShutdown() || cloudEventDispatcher.isTerminated()) {
             throw new IllegalStateException("Cannot start subscription because the executor is shutdown or terminated.");
@@ -171,13 +166,13 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
         cloudEventDispatcher.execute(executeWithRetry(internalSubscription, NOT_SHUTDOWN, retryStrategy));
     }
 
-    private void newInternalSubscription(String subscriptionId, SubscriptionFilter filter, Supplier<StartAt> startAtSupplier, Consumer<CloudEvent> action, CountDownLatch subscriptionStartedLatch) {
+    private void newInternalSubscription(String subscriptionId, SubscriptionFilter filter, StartAt startAt, Consumer<CloudEvent> action, CountDownLatch subscriptionStartedLatch) {
         List<Bson> pipeline = createPipeline(timeRepresentation, filter);
         ChangeStreamIterable<Document> changeStreamDocuments = eventCollection.watch(pipeline, Document.class);
-        ChangeStreamIterable<Document> changeStreamDocumentsAtPosition = MongoCommons.applyStartPosition(changeStreamDocuments, ChangeStreamIterable::startAfter, ChangeStreamIterable::startAtOperationTime, startAtSupplier.get());
+        ChangeStreamIterable<Document> changeStreamDocumentsAtPosition = MongoCommons.applyStartPosition(changeStreamDocuments, ChangeStreamIterable::startAfter, ChangeStreamIterable::startAtOperationTime, startAt.get());
         MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor = changeStreamDocumentsAtPosition.cursor();
 
-        InternalSubscription internalSubscription = new InternalSubscription(cursor, startAtSupplier, action, filter, subscriptionStartedLatch);
+        InternalSubscription internalSubscription = new InternalSubscription(cursor, startAt, action, filter, subscriptionStartedLatch);
 
         if (running) {
             runningSubscriptions.put(subscriptionId, internalSubscription);
@@ -247,24 +242,15 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
         runningSubscriptions.keySet().forEach(this::cancelSubscription);
         runningSubscriptions.clear();
         pausedSubscriptions.clear();
-        if (!cloudEventDispatcher.isShutdown() && !cloudEventDispatcher.isTerminated()) {
-            cloudEventDispatcher.shutdown();
-            try {
-                if (!cloudEventDispatcher.awaitTermination(5, SECONDS)) {
-                    cloudEventDispatcher.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                cloudEventDispatcher.shutdownNow();
-            }
-        }
+        ExecutorShutdown.shutdownSafely(cloudEventDispatcher, 5, TimeUnit.SECONDS);
     }
 
     @Override
     public SubscriptionPosition globalSubscriptionPosition() {
-        // Note that we increase the "increment" by 1 in order to not clash with an existing event in the event store.
-        // This is so that we can avoid duplicates in certain rare cases when replaying events.
         BsonTimestamp currentOperationTime;
         try {
+            // Note that we increase the "increment" by 1 in order to not clash with an existing event in the event store.
+            // This is so that we can avoid duplicates in certain rare cases when replaying events.
             currentOperationTime = MongoCommons.getServerOperationTime(database.runCommand(new Document("hostInfo", 1)), 1);
         } catch (MongoCommandException e) {
             log.warn(cannotFindGlobalSubscriptionPositionErrorMessage(e));
@@ -324,7 +310,7 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         Runnable newSubscription = () -> newInternalSubscription(subscriptionId, internalSubscription.filter,
-                internalSubscription.startAtSupplier, internalSubscription.action, startedLatch);
+                internalSubscription.startAt, internalSubscription.action, startedLatch);
         startSubscription(newSubscription);
 
         return new NativeMongoSubscription(subscriptionId, startedLatch);
@@ -355,14 +341,14 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
         final CountDownLatch startedLatch;
         final CountDownLatch stoppedLatch;
         final MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor;
-        final Supplier<StartAt> startAtSupplier;
+        final StartAt startAt;
         final Consumer<CloudEvent> action;
 
-        private InternalSubscription(MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor, Supplier<StartAt> startAtSupplier, Consumer<CloudEvent> action, SubscriptionFilter filter, CountDownLatch startedLatch) {
+        private InternalSubscription(MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor, StartAt startAtSupplier, Consumer<CloudEvent> action, SubscriptionFilter filter, CountDownLatch startedLatch) {
             this.filter = filter;
             this.startedLatch = startedLatch;
             this.cursor = cursor;
-            this.startAtSupplier = startAtSupplier;
+            this.startAt = startAtSupplier;
             this.action = action;
             this.stoppedLatch = new CountDownLatch(1);
         }
@@ -372,12 +358,12 @@ public class NativeMongoSubscriptionModel implements PositionAwareSubscriptionMo
             if (this == o) return true;
             if (!(o instanceof InternalSubscription)) return false;
             InternalSubscription that = (InternalSubscription) o;
-            return Objects.equals(filter, that.filter) && Objects.equals(startedLatch, that.startedLatch) && Objects.equals(stoppedLatch, that.stoppedLatch) && Objects.equals(cursor, that.cursor) && Objects.equals(startAtSupplier, that.startAtSupplier) && Objects.equals(action, that.action);
+            return Objects.equals(filter, that.filter) && Objects.equals(startedLatch, that.startedLatch) && Objects.equals(stoppedLatch, that.stoppedLatch) && Objects.equals(cursor, that.cursor) && Objects.equals(startAt, that.startAt) && Objects.equals(action, that.action);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(filter, startedLatch, stoppedLatch, cursor, startAtSupplier, action);
+            return Objects.hash(filter, startedLatch, stoppedLatch, cursor, startAt, action);
         }
 
         void started() {

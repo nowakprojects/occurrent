@@ -83,7 +83,7 @@ import static org.occurrent.time.TimeConversion.toLocalDateTime;
 public class NativeMongoSubscriptionPositionStorageTest {
 
     @Container
-    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8");
+    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8").withReuse(true);
     private static final String TIMESTAMP_TOKEN_COLLECTION = "subscriptions";
 
     @RegisterExtension
@@ -359,11 +359,6 @@ public class NativeMongoSubscriptionPositionStorageTest {
     }
 
     private static void cancelSubscription(DelegatingSubscriptionModel subscriptionModel, String subscriberId) {
-        SubscriptionModel sm = subscriptionModel.getDelegatedSubscriptionModelRecursively();
-        if (sm instanceof SubscriptionModelCancelSubscription) {
-            ((SubscriptionModelLifeCycle) sm).cancelSubscription(subscriberId);
-        } else {
-            throw new IllegalArgumentException("Cannot cancel " + subscriberId);
-        }
+        subscriptionModel.getDelegatedSubscriptionModelRecursively().cancelSubscription(subscriberId);
     }
 }

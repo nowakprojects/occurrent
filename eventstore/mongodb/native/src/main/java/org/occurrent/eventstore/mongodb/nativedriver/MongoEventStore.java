@@ -16,7 +16,7 @@
 
 package org.occurrent.eventstore.mongodb.nativedriver;
 
-import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoException;
 import com.mongodb.TransactionOptions;
 import com.mongodb.client.*;
 import com.mongodb.client.model.IndexOptions;
@@ -29,13 +29,12 @@ import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.occurrent.cloudevents.OccurrentExtensionGetter;
 import org.occurrent.condition.Condition;
-import org.occurrent.eventstore.api.LongConditionEvaluator;
-import org.occurrent.eventstore.api.WriteCondition;
-import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
+import org.occurrent.eventstore.api.*;
 import org.occurrent.eventstore.api.blocking.EventStore;
 import org.occurrent.eventstore.api.blocking.EventStoreOperations;
 import org.occurrent.eventstore.api.blocking.EventStoreQueries;
 import org.occurrent.eventstore.api.blocking.EventStream;
+import org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator.WriteContext;
 import org.occurrent.filter.Filter;
 import org.occurrent.functionalsupport.internal.FunctionalSupport.Pair;
 import org.occurrent.mongodb.spring.filterbsonfilterconversion.internal.FilterToBsonFilterConverter;
@@ -59,12 +58,13 @@ import static com.mongodb.client.model.Sorts.descending;
 import static java.util.Objects.requireNonNull;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_ID;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_VERSION;
+import static org.occurrent.eventstore.api.SortBy.*;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.ASCENDING;
 import static org.occurrent.eventstore.api.WriteCondition.StreamVersionWriteCondition;
 import static org.occurrent.eventstore.api.WriteCondition.anyStreamVersion;
-import static org.occurrent.eventstore.mongodb.internal.MongoBulkWriteExceptionToDuplicateCloudEventExceptionTranslator.translateToDuplicateCloudEventException;
+import static org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator.translateException;
 import static org.occurrent.eventstore.mongodb.internal.OccurrentCloudEventMongoDocumentMapper.convertToCloudEvent;
 import static org.occurrent.eventstore.mongodb.internal.OccurrentCloudEventMongoDocumentMapper.convertToDocument;
-import static org.occurrent.filter.Filter.TIME;
 import static org.occurrent.functionalsupport.internal.FunctionalSupport.zip;
 
 /**
@@ -128,7 +128,7 @@ public class MongoEventStore implements EventStore, EventStoreOperations, EventS
                     return new EventStreamImpl<>(streamId, 0, Stream.empty());
                 }
 
-                Stream<Document> stream = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.NATURAL_ASC, clientSession);
+                Stream<Document> stream = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.streamVersion(ASCENDING), clientSession);
                 return new EventStreamImpl<>(streamId, currentStreamVersion, stream);
             }, transactionOptions);
         }
@@ -160,39 +160,24 @@ public class MongoEventStore implements EventStore, EventStoreOperations, EventS
             documentsWithSkipAndLimit = documentsWithoutSkipAndLimit;
         }
 
-        switch (sortBy) {
-            case TIME_ASC:
-                documentsWithoutSkipAndLimit.sort(ascending(TIME));
-                break;
-            case TIME_DESC:
-                documentsWithoutSkipAndLimit.sort(descending(TIME));
-                break;
-            case NATURAL_ASC:
-                documentsWithoutSkipAndLimit.sort(ascending(NATURAL));
-                break;
-            case NATURAL_DESC:
-                documentsWithoutSkipAndLimit.sort(descending(NATURAL));
-                break;
-            default:
-                throw new IllegalStateException("Unexpected value: " + sortBy);
-        }
+        Bson sort = convertToMongoDBSort(sortBy);
 
-        return StreamSupport.stream(documentsWithSkipAndLimit.spliterator(), false);
+        return StreamSupport.stream(documentsWithSkipAndLimit.sort(sort).spliterator(), false);
     }
 
     @Override
-    public void write(String streamId, Stream<CloudEvent> events) {
-        write(streamId, anyStreamVersion(), events);
+    public WriteResult write(String streamId, Stream<CloudEvent> events) {
+        return write(streamId, anyStreamVersion(), events);
     }
 
     @Override
-    public void write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
+    public WriteResult write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
         if (writeCondition == null) {
             throw new IllegalArgumentException(WriteCondition.class.getSimpleName() + " cannot be null");
         }
 
         try (ClientSession clientSession = mongoClient.startSession()) {
-            clientSession.withTransaction(() -> {
+            Long newStreamVersion = clientSession.withTransaction(() -> {
                 long currentStreamVersion = currentStreamVersion(streamId);
 
                 if (!isFulfilled(currentStreamVersion, writeCondition)) {
@@ -203,15 +188,18 @@ public class MongoEventStore implements EventStore, EventStoreOperations, EventS
                         .map(pair -> convertToDocument(timeRepresentation, streamId, pair.t1, pair.t2))
                         .collect(Collectors.toList());
 
-                if (!cloudEventDocuments.isEmpty()) {
+                if (cloudEventDocuments.isEmpty()) {
+                    return currentStreamVersion;
+                } else {
                     try {
                         eventCollection.insertMany(clientSession, cloudEventDocuments);
-                    } catch (MongoBulkWriteException e) {
-                        throw translateToDuplicateCloudEventException(e);
+                    } catch (MongoException e) {
+                        throw translateException(new WriteContext(streamId, currentStreamVersion, writeCondition), e);
                     }
+                    return cloudEventDocuments.get(cloudEventDocuments.size() - 1).getLong(STREAM_VERSION);
                 }
-                return "";
             }, transactionOptions);
+            return new WriteResult(streamId, newStreamVersion);
         }
     }
 
@@ -344,8 +332,9 @@ public class MongoEventStore implements EventStore, EventStoreOperations, EventS
         }
         // Cloud spec defines id + source must be unique!
         eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending("id"), Indexes.ascending("source")), new IndexOptions().unique(true));
-        // Create a streamId + streamVersion index (note that we don't need to index stream id separately since it's covered by this compound index)
-        eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.descending(STREAM_VERSION)), new IndexOptions().unique(true));
+        // Create a streamId + streamVersion ascending index (note that we don't need to index stream id separately since it's covered by this compound index)
+        // Note also that this index supports when sorting both ascending and descending since MongoDB can traverse an index in both directions.
+        eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.ascending(STREAM_VERSION)), new IndexOptions().unique(true));
     }
 
     private static boolean collectionExists(MongoDatabase mongoDatabase, String collectionName) {
@@ -365,5 +354,23 @@ public class MongoEventStore implements EventStore, EventStoreOperations, EventS
         requireNonNull(cloudEventId, "Cloud event id cannot be null");
         requireNonNull(cloudEventSource, "Cloud event source cannot be null");
         return and(eq("id", cloudEventId), eq("source", cloudEventSource.toString()));
+    }
+
+    private static Bson convertToMongoDBSort(SortBy sortBy) {
+        final Bson sort;
+        if (sortBy instanceof NaturalImpl) {
+            sort = ((NaturalImpl) sortBy).direction == ASCENDING ? ascending(NATURAL) : descending(NATURAL);
+        } else if (sortBy instanceof SingleFieldImpl) {
+            SingleFieldImpl singleField = (SingleFieldImpl) sortBy;
+            sort = singleField.direction == ASCENDING ? ascending(singleField.fieldName) : descending(singleField.fieldName);
+        } else if (sortBy instanceof MultipleSortStepsImpl) {
+            sort = ((MultipleSortStepsImpl) sortBy).steps.stream()
+                    .map(MongoEventStore::convertToMongoDBSort)
+                    .reduce(Sorts::orderBy)
+                    .orElseThrow(() -> new IllegalStateException("Internal error: Expecting " + MultipleSortStepsImpl.class.getSimpleName() + " to have at least one step"));
+        } else {
+            throw new IllegalArgumentException("Internal error: Unrecognized " + SortBy.class.getSimpleName() + " instance: " + sortBy.getClass().getSimpleName());
+        }
+        return sort;
     }
 }

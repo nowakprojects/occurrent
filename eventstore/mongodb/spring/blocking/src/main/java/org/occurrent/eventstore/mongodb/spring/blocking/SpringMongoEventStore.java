@@ -16,22 +16,22 @@
 
 package org.occurrent.eventstore.mongodb.spring.blocking;
 
-import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoException;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import io.cloudevents.CloudEvent;
 import org.bson.Document;
+import org.occurrent.cloudevents.OccurrentCloudEventExtension;
 import org.occurrent.cloudevents.OccurrentExtensionGetter;
 import org.occurrent.condition.Condition;
-import org.occurrent.eventstore.api.LongConditionEvaluator;
-import org.occurrent.eventstore.api.WriteCondition;
+import org.occurrent.eventstore.api.*;
 import org.occurrent.eventstore.api.WriteCondition.StreamVersionWriteCondition;
-import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
 import org.occurrent.eventstore.api.blocking.EventStore;
 import org.occurrent.eventstore.api.blocking.EventStoreOperations;
 import org.occurrent.eventstore.api.blocking.EventStoreQueries;
 import org.occurrent.eventstore.api.blocking.EventStream;
+import org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator.WriteContext;
 import org.occurrent.filter.Filter;
 import org.occurrent.mongodb.spring.filterqueryconversion.internal.FilterConverter;
 import org.occurrent.mongodb.timerepresentation.TimeRepresentation;
@@ -52,12 +52,12 @@ import java.util.stream.Stream;
 import static java.util.Objects.requireNonNull;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_ID;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_VERSION;
-import static org.occurrent.eventstore.mongodb.internal.MongoBulkWriteExceptionToDuplicateCloudEventExceptionTranslator.translateToDuplicateCloudEventException;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.ASCENDING;
+import static org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator.translateException;
 import static org.occurrent.eventstore.mongodb.internal.OccurrentCloudEventMongoDocumentMapper.convertToCloudEvent;
 import static org.occurrent.eventstore.mongodb.internal.OccurrentCloudEventMongoDocumentMapper.convertToDocument;
-import static org.occurrent.filter.Filter.TIME;
 import static org.occurrent.functionalsupport.internal.FunctionalSupport.mapWithIndex;
-import static org.springframework.data.domain.Sort.Direction.ASC;
+import static org.occurrent.mongodb.spring.sortconversion.internal.SortConverter.convertToSpringSort;
 import static org.springframework.data.domain.Sort.Direction.DESC;
 import static org.springframework.data.mongodb.SessionSynchronization.ALWAYS;
 import static org.springframework.data.mongodb.core.query.Criteria.where;
@@ -69,7 +69,6 @@ import static org.springframework.data.mongodb.core.query.Criteria.where;
 public class SpringMongoEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
     private static final String ID = "_id";
-    private static final String NATURAL = "$natural";
 
     private final MongoTemplate mongoTemplate;
     private final String eventStoreCollectionName;
@@ -98,30 +97,35 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
         return requireNonNull(eventStream).map(document -> convertToCloudEvent(timeRepresentation, document));
     }
 
+    @SuppressWarnings("ConstantConditions")
     @Override
-    public void write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
+    public WriteResult write(String streamId, WriteCondition writeCondition, Stream<CloudEvent> events) {
         if (writeCondition == null) {
             throw new IllegalArgumentException(WriteCondition.class.getSimpleName() + " cannot be null");
         }
 
-        transactionTemplate.executeWithoutResult(transactionStatus -> {
+        long newStreamVersion = transactionTemplate.execute(transactionStatus -> {
             long currentStreamVersion = currentStreamVersion(streamId);
 
             if (!isFulfilled(currentStreamVersion, writeCondition)) {
-                throw new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition.toString(), currentStreamVersion));
+                throw new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition, currentStreamVersion));
             }
 
             List<Document> cloudEventDocuments = mapWithIndex(events, currentStreamVersion, pair -> convertToDocument(timeRepresentation, streamId, pair.t1, pair.t2)).collect(Collectors.toList());
 
             if (!cloudEventDocuments.isEmpty()) {
-                insertAll(cloudEventDocuments);
+                insertAll(streamId, currentStreamVersion, writeCondition, cloudEventDocuments);
+                return cloudEventDocuments.get(cloudEventDocuments.size() - 1).getLong(OccurrentCloudEventExtension.STREAM_VERSION);
+            } else {
+                return currentStreamVersion;
             }
         });
+        return new WriteResult(streamId, newStreamVersion);
     }
 
     @Override
-    public void write(String streamId, Stream<CloudEvent> events) {
-        write(streamId, StreamVersionWriteCondition.any(), events);
+    public WriteResult write(String streamId, Stream<CloudEvent> events) {
+        return write(streamId, StreamVersionWriteCondition.any(), events);
     }
 
     @Override
@@ -193,7 +197,8 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
     // Queries
     @Override
     public Stream<CloudEvent> query(Filter filter, int skip, int limit, SortBy sortBy) {
-        requireNonNull(filter, "Filter cannot be null");
+        requireNonNull(filter, Filter.class.getSimpleName() + " cannot be null");
+        requireNonNull(sortBy, SortBy.class.getSimpleName() + " cannot be null");
         final Query query = FilterConverter.convertFilterToQuery(timeRepresentation, filter);
         return readCloudEvents(query, skip, limit, sortBy)
                 .map(document -> convertToCloudEvent(timeRepresentation, document));
@@ -255,11 +260,11 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
         }
     }
 
-    private void insertAll(List<Document> documents) {
+    private void insertAll(String streamId, long streamVersion, WriteCondition writeCondition, List<Document> documents) {
         try {
             mongoTemplate.getCollection(eventStoreCollectionName).insertMany(documents);
-        } catch (MongoBulkWriteException e) {
-            throw translateToDuplicateCloudEventException(e);
+        } catch (MongoException e) {
+            throw translateException(new WriteContext(streamId, streamVersion, writeCondition), e);
         }
     }
 
@@ -287,7 +292,7 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
             return new EventStreamImpl<>(streamId, 0, Stream.empty());
         }
 
-        Stream<Document> stream = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.NATURAL_ASC);
+        Stream<Document> stream = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.streamVersion(ASCENDING));
         return new EventStreamImpl<>(streamId, currentStreamVersion, stream);
     }
 
@@ -309,24 +314,8 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
             query.skip(skip).limit(limit);
         }
 
-        switch (sortBy) {
-            case TIME_ASC:
-                query.with(Sort.by(ASC, TIME));
-                break;
-            case TIME_DESC:
-                query.with(Sort.by(DESC, TIME));
-                break;
-            case NATURAL_ASC:
-                query.with(Sort.by(ASC, NATURAL));
-                break;
-            case NATURAL_DESC:
-                query.with(Sort.by(DESC, NATURAL));
-                break;
-            default:
-                throw new IllegalStateException("Unexpected value: " + sortBy);
-        }
-
-        return StreamUtils.createStreamFromIterator(mongoTemplate.stream(query, Document.class, eventStoreCollectionName));
+        Sort sort = convertToSpringSort(sortBy);
+        return StreamUtils.createStreamFromIterator(mongoTemplate.stream(query.with(sort), Document.class, eventStoreCollectionName));
     }
 
     // Initialization
@@ -337,8 +326,9 @@ public class SpringMongoEventStore implements EventStore, EventStoreOperations, 
         MongoCollection<Document> eventStoreCollection = mongoTemplate.getCollection(eventStoreCollectionName);
         // Cloud spec defines id + source must be unique!
         eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending("id"), Indexes.ascending("source")), new IndexOptions().unique(true));
-        // Create a streamId + streamVersion index (note that we don't need to index stream id separately since it's covered by this compound index)
-        eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.descending(STREAM_VERSION)), new IndexOptions().unique(true));
+        // Create a streamId + streamVersion ascending index (note that we don't need to index stream id separately since it's covered by this compound index)
+        // Note also that this index supports when sorting both ascending and descending since MongoDB can traverse an index in both directions.
+        eventStoreCollection.createIndex(Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.ascending(STREAM_VERSION)), new IndexOptions().unique(true));
 
         // SessionSynchronization need to be "ALWAYS" in order for TransactionTemplate to work with mongo template!
         // See https://docs.spring.io/spring-data/mongodb/docs/current/reference/html/#mongo.transactions.transaction-template

@@ -39,7 +39,9 @@ import org.occurrent.mongodb.timerepresentation.TimeRepresentation;
 import org.occurrent.retry.RetryStrategy;
 import org.occurrent.subscription.StringBasedSubscriptionPosition;
 import org.occurrent.subscription.SubscriptionPosition;
-import org.occurrent.subscription.api.blocking.*;
+import org.occurrent.subscription.api.blocking.DelegatingSubscriptionModel;
+import org.occurrent.subscription.api.blocking.SubscriptionModel;
+import org.occurrent.subscription.api.blocking.SubscriptionPositionStorage;
 import org.occurrent.subscription.blocking.durable.DurableSubscriptionModel;
 import org.occurrent.subscription.blocking.durable.DurableSubscriptionModelConfig;
 import org.occurrent.subscription.mongodb.MongoFilterSpecification.MongoJsonFilterSpecification;
@@ -86,7 +88,7 @@ import static org.occurrent.time.TimeConversion.toLocalDateTime;
 public class SpringMongoSubscriptionPositionStorageTest {
 
     @Container
-    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8");
+    private static final MongoDBContainer mongoDBContainer = new MongoDBContainer("mongo:4.2.8").withReuse(true);
     private static final String RESUME_TOKEN_COLLECTION = "ack";
 
     @RegisterExtension
@@ -136,7 +138,7 @@ public class SpringMongoSubscriptionPositionStorageTest {
         mongoEventStore.write("1", 1, serialize(nameWasChanged1));
 
         // Then
-        await().atMost(2, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
+        await().atMost(4, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
     }
 
     @Test
@@ -207,7 +209,7 @@ public class SpringMongoSubscriptionPositionStorageTest {
         mongoEventStore.write("1", 1, serialize(nameWasChanged1));
 
         // Then
-        await().atMost(2, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> {
+        await().atMost(4, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> {
             assertThat(state).hasSize(3);
             assertThat(numberOfWritesToBlockingSubscriptionStorage).hasValue(4); // 3 events and one for global subscription position
         });
@@ -255,13 +257,13 @@ public class SpringMongoSubscriptionPositionStorageTest {
         mongoEventStore.write("1", 1, serialize(nameWasChanged1));
 
         // Then
-        await().atMost(2, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> {
+        await().atMost(4, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> {
             assertThat(state).hasSize(3);
             assertThat(numberOfWritesToBlockingSubscriptionStorage).hasValue(2); // 1 event and one for global subscription position
         });
     }
 
-    @Test
+    @RepeatedIfExceptionsTest(repeats = 2, suspend = 500)
     void blocking_spring_subscription_allows_resuming_events_from_where_it_left_off() {
         // Given
         LocalDateTime now = LocalDateTime.now();
@@ -276,13 +278,13 @@ public class SpringMongoSubscriptionPositionStorageTest {
         mongoEventStore.write("1", 0, serialize(nameDefined1));
         cancelSubscription(subscriptionModel, subscriberId);
         // The subscription is async so we need to wait for it
-        await().atMost(ONE_SECOND).until(not(state::isEmpty));
+        await("state not to be empty").atMost(4, SECONDS).until(not(state::isEmpty));
         mongoEventStore.write("2", 0, serialize(nameDefined2));
         mongoEventStore.write("1", 1, serialize(nameWasChanged1));
         subscriptionModel.subscribe(subscriberId, state::add);
 
         // Then
-        await().atMost(2, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
+        await("state to has size equal to 3").atMost(5, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
     }
 
     @Test
@@ -328,10 +330,10 @@ public class SpringMongoSubscriptionPositionStorageTest {
         mongoEventStore.write("1", 1, serialize(nameWasChanged1));
 
         // Then
-        await().atMost(2, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
+        await().atMost(4, SECONDS).with().pollInterval(Duration.of(20, MILLIS)).untilAsserted(() -> assertThat(state).hasSize(3));
     }
 
-    @RepeatedIfExceptionsTest(repeats = 2)
+    @RepeatedIfExceptionsTest(repeats = 2, suspend = 500)
     void blocking_spring_subscription_allows_cancelling_subscription() {
         // Given
         LocalDateTime now = LocalDateTime.now();
@@ -463,11 +465,6 @@ public class SpringMongoSubscriptionPositionStorageTest {
     }
 
     private static void cancelSubscription(DelegatingSubscriptionModel subscriptionModel, String subscriberId) {
-        SubscriptionModel sm = subscriptionModel.getDelegatedSubscriptionModelRecursively();
-        if (sm instanceof SubscriptionModelCancelSubscription) {
-            ((SubscriptionModelLifeCycle) sm).cancelSubscription(subscriberId);
-        } else {
-            throw new IllegalArgumentException("Cannot cancel " + subscriberId);
-        }
+        subscriptionModel.getDelegatedSubscriptionModelRecursively().cancelSubscription(subscriberId);
     }
 }

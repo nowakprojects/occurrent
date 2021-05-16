@@ -22,7 +22,7 @@
     <groupId>org.occurrent</groupId>
     <artifactId>occurrent</artifactId>
     <packaging>pom</packaging>
-    <version>0.7.3-SNAPSHOT</version>
+    <version>0.10.1-SNAPSHOT</version>
     <modules>
         <module>test-support</module>
         <module>example</module>
@@ -67,16 +67,16 @@
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>
         <junit.version>5.6.2</junit.version>
-        <test-containers.version>1.15.1</test-containers.version>
-        <kotlin.version>1.4.30</kotlin.version>
+        <test-containers.version>1.15.2</test-containers.version>
+        <kotlin.version>1.4.32</kotlin.version>
         <jackson.version>2.11.1</jackson.version>
-        <cloudevents.version>2.0.0.RC2</cloudevents.version>
-        <reactor.version>3.4.2</reactor.version>
+        <cloudevents.version>2.1.0</cloudevents.version>
+        <reactor.version>3.4.4</reactor.version>
+        <spring-data-mongodb.version>3.1.7</spring-data-mongodb.version>
+        <spring-boot.version>2.4.4</spring-boot.version>
+        <mongo.version>4.2.2</mongo.version>
         <spring-data-jdbc.version>2.1.3</spring-data-jdbc.version>
-        <spring-data-mongodb.version>3.1.1</spring-data-mongodb.version>
-        <spring-boot.version>2.4.2</spring-boot.version>
         <spring-jdbc.version>5.3.3</spring-jdbc.version>
-        <mongo.version>4.1.1</mongo.version>
         <dokka.version>1.4.10.2</dokka.version>
         <awaitility.version>4.0.3</awaitility.version>
         <postgresql.version>42.2.18</postgresql.version>
@@ -182,7 +182,7 @@
             <dependency>
                 <groupId>org.springframework</groupId>
                 <artifactId>spring-aspects</artifactId>
-                <version>5.2.9.RELEASE</version>
+                <version>5.3.5</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
@@ -192,7 +192,7 @@
             <dependency>
                 <groupId>org.springframework.retry</groupId>
                 <artifactId>spring-retry</artifactId>
-                <version>1.3.0</version>
+                <version>1.3.1</version>
                 <exclusions>
                     <exclusion>
                         <groupId>org.springframework</groupId>
@@ -215,7 +215,7 @@
             <dependency>
                 <groupId>org.jetbrains.kotlinx</groupId>
                 <artifactId>kotlinx-collections-immutable-jvm</artifactId>
-                <version>0.3.2</version>
+                <version>0.3.4</version>
             </dependency>
 
             <!-- Redis -->
@@ -227,7 +227,7 @@
             <dependency>
                 <groupId>io.lettuce</groupId>
                 <artifactId>lettuce-core</artifactId>
-                <version>6.0.1.RELEASE</version>
+                <version>6.1.0.RELEASE</version>
             </dependency>
             <!-- Mongo -->
             <dependency>
@@ -261,7 +261,6 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-starter-test</artifactId>
                 <version>${spring-boot.version}</version>
-                <scope>test</scope>
                 <exclusions>
                     <exclusion>
                         <groupId>org.junit.vintage</groupId>
@@ -338,6 +337,11 @@
                 <groupId>io.github.artsok</groupId>
                 <artifactId>rerunner-jupiter</artifactId>
                 <version>2.1.6</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>3.7.7</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

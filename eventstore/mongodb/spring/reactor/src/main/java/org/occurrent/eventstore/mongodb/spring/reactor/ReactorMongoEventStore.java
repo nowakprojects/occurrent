@@ -16,7 +16,7 @@
 
 package org.occurrent.eventstore.mongodb.spring.reactor;
 
-import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoException;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import com.mongodb.reactivestreams.client.MongoCollection;
@@ -24,20 +24,20 @@ import io.cloudevents.CloudEvent;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.occurrent.cloudevents.OccurrentExtensionGetter;
-import org.occurrent.eventstore.api.LongConditionEvaluator;
-import org.occurrent.eventstore.api.WriteCondition;
-import org.occurrent.eventstore.api.WriteConditionNotFulfilledException;
+import org.occurrent.eventstore.api.*;
 import org.occurrent.eventstore.api.reactor.EventStore;
 import org.occurrent.eventstore.api.reactor.EventStoreOperations;
 import org.occurrent.eventstore.api.reactor.EventStoreQueries;
 import org.occurrent.eventstore.api.reactor.EventStream;
-import org.occurrent.eventstore.mongodb.internal.MongoBulkWriteExceptionToDuplicateCloudEventExceptionTranslator;
+import org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator;
+import org.occurrent.eventstore.mongodb.internal.MongoExceptionTranslator.WriteContext;
 import org.occurrent.eventstore.mongodb.internal.OccurrentCloudEventMongoDocumentMapper;
 import org.occurrent.filter.Filter;
 import org.occurrent.mongodb.spring.filterqueryconversion.internal.FilterConverter;
 import org.occurrent.mongodb.timerepresentation.TimeRepresentation;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.UncategorizedMongoDbException;
 import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -45,14 +45,15 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.Collection;
 import java.util.Objects;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_ID;
 import static org.occurrent.cloudevents.OccurrentCloudEventExtension.STREAM_VERSION;
-import static org.occurrent.filter.Filter.TIME;
-import static org.springframework.data.domain.Sort.Direction.ASC;
+import static org.occurrent.eventstore.api.SortBy.SortDirection.ASCENDING;
+import static org.occurrent.mongodb.spring.sortconversion.internal.SortConverter.convertToSpringSort;
 import static org.springframework.data.domain.Sort.Direction.DESC;
 import static org.springframework.data.mongodb.SessionSynchronization.ALWAYS;
 import static org.springframework.data.mongodb.core.query.Criteria.where;
@@ -65,7 +66,6 @@ import static org.springframework.data.mongodb.core.query.Criteria.where;
 public class ReactorMongoEventStore implements EventStore, EventStoreOperations, EventStoreQueries {
 
     private static final String ID = "_id";
-    private static final String NATURAL = "$natural";
 
     private final ReactiveMongoTemplate mongoTemplate;
     private final String eventStoreCollectionName;
@@ -89,46 +89,34 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
     }
 
     @Override
-    public Mono<Void> write(String streamId, Flux<CloudEvent> events) {
+    public Mono<WriteResult> write(String streamId, Flux<CloudEvent> events) {
         return write(streamId, WriteCondition.anyStreamVersion(), events);
     }
 
     @Override
-    public Mono<Void> write(String streamId, WriteCondition writeCondition, Flux<CloudEvent> events) {
+    public Mono<WriteResult> write(String streamId, WriteCondition writeCondition, Flux<CloudEvent> events) {
         if (writeCondition == null) {
             throw new IllegalArgumentException(WriteCondition.class.getSimpleName() + " cannot be null");
         }
 
-        return transactionalOperator.execute(transactionStatus -> {
-                    Flux<Document> documentFlux = currentStreamVersion(streamId)
-                            .flatMap(currentStreamVersion -> {
-                                final Mono<Long> result;
-                                if (isFulfilled(currentStreamVersion, writeCondition)) {
-                                    result = Mono.just(currentStreamVersion);
-                                } else {
-                                    result = Mono.error(new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition.toString(), currentStreamVersion)));
-                                }
-                                return result;
-                            })
-                            .flatMapMany(currentStreamVersion ->
-                                    infiniteFluxFrom(currentStreamVersion)
-                                            .zipWith(events)
-                                            .map(streamVersionAndEvent -> {
-                                                long streamVersion = streamVersionAndEvent.getT1();
-                                                CloudEvent event = streamVersionAndEvent.getT2();
-                                                return OccurrentCloudEventMongoDocumentMapper.convertToDocument(timeRepresentation, streamId, streamVersion, event);
-                                            }));
-                    return insertAll(documentFlux);
-                }
-        ).then();
-    }
+        Mono<Long> operation = currentStreamVersion(streamId)
+                .flatMap(currentStreamVersion -> validateWriteCondition(streamId, writeCondition, currentStreamVersion))
+                .flatMap(currentStreamVersion -> {
+                    Flux<Document> documentFlux = convertEventsToMongoDocuments(streamId, events, currentStreamVersion);
+                    Mono<Long> newStreamVersionFlux = documentFlux.collectList().flatMap(documents -> {
+                        final long newStreamVersion;
+                        if (documents.isEmpty()) {
+                            newStreamVersion = currentStreamVersion;
+                        } else {
+                            newStreamVersion = documents.get(documents.size() - 1).getLong(STREAM_VERSION);
+                        }
+                        return insertAll(streamId, currentStreamVersion, writeCondition, documents).then(Mono.just(newStreamVersion));
+                    });
+                    return newStreamVersionFlux.switchIfEmpty(Mono.just(currentStreamVersion));
+                });
 
-    private static Flux<Long> infiniteFluxFrom(Long currentStreamVersion) {
-        return Flux.generate(() -> currentStreamVersion, (version, sink) -> {
-            long nextVersion = version + 1L;
-            sink.next(nextVersion);
-            return nextVersion;
-        });
+        return transactionalOperator.transactional(operation)
+                .map(newStreamVersion -> new WriteResult(streamId, newStreamVersion));
     }
 
     @Override
@@ -146,7 +134,7 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
     private Mono<EventStreamImpl> readEventStream(String streamId, int skip, int limit) {
         return currentStreamVersion(streamId)
                 .flatMap(currentStreamVersion -> {
-                    Flux<Document> cloudEventDocuments = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.NATURAL_ASC);
+                    Flux<Document> cloudEventDocuments = readCloudEvents(streamIdEqualTo(streamId), skip, limit, SortBy.streamVersion(ASCENDING));
                     return Mono.just(new EventStreamImpl(streamId, currentStreamVersion, cloudEventDocuments));
                 })
                 .switchIfEmpty(Mono.fromSupplier(() -> new EventStreamImpl(streamId, 0, Flux.empty())));
@@ -157,24 +145,8 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
             query.skip(skip).limit(limit);
         }
 
-        switch (sortBy) {
-            case TIME_ASC:
-                query.with(Sort.by(ASC, TIME));
-                break;
-            case TIME_DESC:
-                query.with(Sort.by(DESC, TIME));
-                break;
-            case NATURAL_ASC:
-                query.with(Sort.by(ASC, NATURAL));
-                break;
-            case NATURAL_DESC:
-                query.with(Sort.by(DESC, NATURAL));
-                break;
-            default:
-                throw new IllegalStateException("Unexpected value: " + sortBy);
-        }
-
-        return mongoTemplate.find(query, Document.class, eventStoreCollectionName);
+        Sort sort = convertToSpringSort(sortBy);
+        return mongoTemplate.find(query.with(sort), Document.class, eventStoreCollectionName);
     }
 
     private Mono<Long> currentStreamVersion(String streamId) {
@@ -186,10 +158,17 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
     }
 
 
-    private Flux<Document> insertAll(Flux<Document> documents) {
-        return mongoTemplate.insertAll(documents.collectList(), eventStoreCollectionName)
+    private Flux<Document> insertAll(String streamId, long streamVersion, WriteCondition writeCondition, Collection<Document> documents) {
+        return mongoTemplate.insert(documents, eventStoreCollectionName)
                 .onErrorMap(DuplicateKeyException.class, Throwable::getCause)
-                .onErrorMap(MongoBulkWriteException.class, MongoBulkWriteExceptionToDuplicateCloudEventExceptionTranslator::translateToDuplicateCloudEventException);
+                .onErrorMap(MongoException.class, e -> MongoExceptionTranslator.translateException(new WriteContext(streamId, streamVersion, writeCondition), e))
+                .onErrorMap(UncategorizedMongoDbException.class, e -> {
+                    if (e.getCause() instanceof MongoException) {
+                        return MongoExceptionTranslator.translateException(new WriteContext(streamId, streamVersion, writeCondition), (MongoException) e.getCause());
+                    } else {
+                        return e;
+                    }
+                });
     }
 
     private static boolean isFulfilled(long streamVersion, WriteCondition writeCondition) {
@@ -213,13 +192,14 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
         Mono<String> indexIdAndSource = createIndex(eventStoreCollectionName, mongoTemplate, Indexes.compoundIndex(Indexes.ascending("id"), Indexes.ascending("source")), new IndexOptions().unique(true));
 
         // Create a streamId + streamVersion index (note that we don't need to index stream id separately since it's covered by this compound index)
-        Mono<String> indexStreamIdAndStreamVersion = createIndex(eventStoreCollectionName, mongoTemplate, Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.descending(STREAM_VERSION)), new IndexOptions().unique(true));
+        // Note also that this index supports when sorting both ascending and descending since MongoDB can traverse an index in both directions.
+        Mono<String> indexStreamIdAndAscendingStreamVersion = createIndex(eventStoreCollectionName, mongoTemplate, Indexes.compoundIndex(Indexes.ascending(STREAM_ID), Indexes.ascending(STREAM_VERSION)), new IndexOptions().unique(true));
 
         // SessionSynchronization need to be "ALWAYS" in order for TransactionTemplate to work with mongo template!
         // See https://docs.spring.io/spring-data/mongodb/docs/current/reference/html/#mongo.transactions.transaction-template
         mongoTemplate.setSessionSynchronization(ALWAYS);
 
-        return createEventStoreCollection.then(indexIdAndSource).then(indexStreamIdAndStreamVersion).then();
+        return createEventStoreCollection.then(indexIdAndSource).then(indexStreamIdAndAscendingStreamVersion).then();
     }
 
     private static Mono<String> createIndex(String eventStoreCollectionName, ReactiveMongoTemplate mongoTemplate, Bson index, IndexOptions indexOptions) {
@@ -360,5 +340,33 @@ public class ReactorMongoEventStore implements EventStore, EventStoreOperations,
 
     private static Query cloudEventIdIs(String cloudEventId, URI cloudEventSource) {
         return Query.query(where("id").is(cloudEventId).and("source").is(cloudEventSource));
+    }
+
+    private static Mono<Long> validateWriteCondition(String streamId, WriteCondition writeCondition, Long currentStreamVersion) {
+        final Mono<Long> result;
+        if (isFulfilled(currentStreamVersion, writeCondition)) {
+            result = Mono.just(currentStreamVersion);
+        } else {
+            result = Mono.error(new WriteConditionNotFulfilledException(streamId, currentStreamVersion, writeCondition, String.format("%s was not fulfilled. Expected version %s but was %s.", WriteCondition.class.getSimpleName(), writeCondition, currentStreamVersion)));
+        }
+        return result;
+    }
+
+    private Flux<Document> convertEventsToMongoDocuments(String streamId, Flux<CloudEvent> events, Long currentStreamVersion) {
+        return infiniteFluxFrom(currentStreamVersion)
+                .zipWith(events)
+                .map(streamVersionAndEvent -> {
+                    long streamVersion = streamVersionAndEvent.getT1();
+                    CloudEvent event = streamVersionAndEvent.getT2();
+                    return OccurrentCloudEventMongoDocumentMapper.convertToDocument(timeRepresentation, streamId, streamVersion, event);
+                });
+    }
+
+    private static Flux<Long> infiniteFluxFrom(Long currentStreamVersion) {
+        return Flux.generate(() -> currentStreamVersion, (version, sink) -> {
+            long nextVersion = version + 1L;
+            sink.next(nextVersion);
+            return nextVersion;
+        });
     }
 }
